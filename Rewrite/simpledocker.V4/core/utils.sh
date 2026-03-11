@@ -41,7 +41,10 @@ _check_deps() {
 }
 
 _strip_ansi() { sed 's/\x1b\[[0-9;]*m//g'; }
+
 _trim_s()    { _strip_ansi | sed 's/^[[:space:]]*//;s/[[:space:]]*$//'; }
+
+_sig_rc()    { [[ ${1:-0} -eq 143 || ${1:-0} -eq 138 || ${1:-0} -eq 137 ]]; }
 
 _log_write() {
     local f="$1"; shift
@@ -78,6 +81,10 @@ _log_rotate() {
     local sz; sz=$(stat -c%s "$f" 2>/dev/null || echo 0)
     [[ "$sz" -gt 10485760 ]] && tail -c 8388608 "$f" > "$f.tmp" 2>/dev/null && mv "$f.tmp" "$f" 2>/dev/null || true
 }
+
+_rand_id()    { local id
+                while true; do id=$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)
+                    [[ ! -d "$CONTAINERS_DIR/$id" ]] && printf '%s' "$id" && return; done; }
 
 _sd_open_url() {
     local url="$1"

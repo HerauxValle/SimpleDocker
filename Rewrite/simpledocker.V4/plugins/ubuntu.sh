@@ -2,7 +2,6 @@
 
 _ubuntu_default_pkgs_file() { printf '%s/.ubuntu_default_pkgs' "$UBUNTU_DIR"; }
 
-
 _ensure_ubuntu() {
     [[ -z "$UBUNTU_DIR" ]] && return 0
     if [[ -f "$UBUNTU_DIR/.ubuntu_ready" && ! -f "$UBUNTU_DIR/usr/bin/apt-get" ]]; then

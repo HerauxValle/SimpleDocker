@@ -2,7 +2,6 @@
 
 _netns_hosts() { printf '%s/.sd/.netns_hosts' "${1:-$MNT_DIR}"; }
 
-
 _netns_setup() {
     local mnt="${1:-$MNT_DIR}" ns idx subnet br veth_h veth_ns ip_ns ip_h
     ns=$(_netns_name "$mnt"); idx=$(_netns_idx "$mnt")
@@ -71,7 +70,6 @@ _netns_ct_del() {
 }
 
 _exposure_file() { printf '%s/exposure' "$CONTAINERS_DIR/$1"; }
-_exposure_get()  { local _v; _v=$(cat "$(_exposure_file "$1")" 2>/dev/null); case "$_v" in isolated|localhost|public) printf "%s" "$_v";; *) printf "localhost";; esac; }
 
 _exposure_next() {
     case "$(_exposure_get "$1")" in

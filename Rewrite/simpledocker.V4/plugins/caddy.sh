@@ -1,50 +1,18 @@
 #!/usr/bin/env bash
 
 _proxy_caddyfile() { printf '%s/.sd/Caddyfile'     "$MNT_DIR"; }
-_proxy_pidfile()   { printf '%s/.sd/.caddy.pid'    "$MNT_DIR"; }
 
 _proxy_caddy_storage() { printf '%s/.sd/caddy/data'        "$MNT_DIR"; }
-_proxy_caddy_runner()  { printf '%s/.sd/caddy/run.sh'      "$MNT_DIR"; }
 
 _proxy_dns_pidfile() { printf '%s/.sd/caddy/dnsmasq.pid'  "$MNT_DIR"; }
-_proxy_dns_conf()    { printf '%s/.sd/caddy/dnsmasq.conf' "$MNT_DIR"; }
 
 _proxy_dns_running() { local p; p=$(cat "$(_proxy_dns_pidfile)" 2>/dev/null); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
 
-
 _hostpkg_flagfile() { printf '%s/.sd/.sd_hostpkg_%s' "$MNT_DIR" "$1"; }
-_hostpkg_installed() { [[ -f "$(_hostpkg_flagfile "$1")" ]]; }
 
 _hostpkg_installed() { [[ -f "$(_hostpkg_flagfile "$1")" ]]; }
-_hostpkg_mark()      { touch "$(_hostpkg_flagfile "$1")" 2>/dev/null; }
 
 _hostpkg_apt_sudoers_path() { printf '/etc/sudoers.d/simpledocker_apt_%s' "$(id -un)"; }
-_hostpkg_ensure_apt_sudoers() { return 0;  # covered by main sudoers written at startup
-    _hostpkg_ensure_apt_sudoers_unused() {
-    local sudoers_path; sudoers_path="$(_hostpkg_apt_sudoers_path)"
-    # Already written — nothing to do
-    [[ -f "$sudoers_path" ]] && return 0
-    local apt_bin; apt_bin=$(command -v apt-get 2>/dev/null || printf '/usr/bin/apt-get')
-    local me; me=$(id -un)
-    local sudoers_line; sudoers_line="${me} ALL=(ALL) NOPASSWD: ${apt_bin}"
-    # Try passwordless first (e.g. already have broad NOPASSWD)
-    if printf '%s\n' "$sudoers_line" | sudo -n tee "$sudoers_path" >/dev/null 2>&1; then
-        chmod 0440 "$sudoers_path" 2>/dev/null || sudo -n chmod 0440 "$sudoers_path" 2>/dev/null || true
-        return 0
-    fi
-    # Need password — ask once in the terminal, then write sudoers
-    printf '\n\033[1m[simpleDocker] One-time sudo setup for plugin installs.\033[0m\n'
-    printf '  This grants passwordless apt-get for your user.\n'
-    printf '  You will not be asked again.\n\n'
-    if printf '%s\n' "$sudoers_line" | sudo tee "$sudoers_path" >/dev/null 2>&1; then
-        sudo chmod 0440 "$sudoers_path" 2>/dev/null || true
-        printf '\033[0;32m✓ Done — plugins will now install silently in background.\033[0m\n\n'
-        return 0
-    fi
-    printf '\033[0;33m⚠  Could not write sudoers — plugin installs will prompt for password.\033[0m\n\n'
-    return 1   # non-fatal: scripts fall back to plain sudo (works when attached)
-    }  # end _hostpkg_ensure_apt_sudoers_unused
-}
 
 _hostpkg_ensure_apt_sudoers() { return 0;  # covered by main sudoers written at startup
     _hostpkg_ensure_apt_sudoers_unused() {
@@ -72,9 +40,10 @@ _hostpkg_ensure_apt_sudoers() { return 0;  # covered by main sudoers written at 
     return 1   # non-fatal: scripts fall back to plain sudo (works when attached)
     }  # end _hostpkg_ensure_apt_sudoers_unused
 }
+
+_avahi_piddir()  { printf '%s/.sd/caddy/avahi' "$MNT_DIR"; }
 
 _avahi_pidfile() { printf '%s/%s.pid' "$(_avahi_piddir)" "$(printf '%s' "$1" | tr './' '__')"; }
-
 
 _avahi_mdns_name() {
     # Append .local to any URL: comfyui.com → comfyui.com.local, comfyui.sd → comfyui.sd.local
@@ -317,7 +286,6 @@ _proxy_update_hosts() {
 }
 
 _proxy_sudoers_path() { printf '/etc/sudoers.d/simpledocker_caddy_%s' "$(id -un)"; }
-
 
 _proxy_ensure_sudoers() {
     # Write a tiny wrapper script that sets CADDY_STORAGE_DIR and execs caddy.

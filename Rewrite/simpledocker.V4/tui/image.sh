@@ -15,10 +15,8 @@ _yazi_pick() {
 }
 
 _pick_img() { _yazi_pick img; }
-_pick_dir() { _yazi_pick; }
 
 _pick_dir() { _yazi_pick; }
-
 
 _setup_image() {
     # Auto-enter if already mounted (resuming session), otherwise always show selection

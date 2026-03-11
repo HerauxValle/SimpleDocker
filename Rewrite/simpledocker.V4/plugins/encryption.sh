@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 
 _luks_is_open() { [[ -b "$(_luks_dev "$1")" ]]; }
-_img_is_luks()  { sudo -n cryptsetup isLuks "$1" 2>/dev/null; }
 
 _luks_open() {
     local img="$1" mapper pass attempts=0
@@ -37,7 +36,6 @@ _luks_open() {
 
 _luks_close() { _luks_is_open "$1" && sudo -n cryptsetup close "$(_luks_mapper "$1")" &>/dev/null || true; }
 
-
 _enc_auto_unlock_enabled() {
     # True if this machine's verification cipher works (verified system slot active)
     printf '%s' "$SD_VERIFICATION_CIPHER" | sudo -n cryptsetup open \
@@ -52,15 +50,11 @@ _enc_system_agnostic_enabled() {
 
 _enc_authkey_path() { printf '%s' "$MNT_DIR/.sd/auth.key"; }
 
-
 _enc_authkey_slot_file() { printf '%s' "$MNT_DIR/.sd/auth.slot"; }
 
-
 _enc_verified_pass() { sha256sum /etc/machine-id 2>/dev/null | cut -c1-32 || printf '%s' "simpledocker_fallback"; }
-_enc_verified_path() { printf '%s/%s' "$(_enc_verified_dir)" "$(_enc_verified_id)"; }
 
 _enc_verified_path() { printf '%s/%s' "$(_enc_verified_dir)" "$(_enc_verified_id)"; }
-_enc_is_verified()   { [[ -f "$(_enc_verified_path)" ]]; }
 
 _enc_vs_write() {
     local _id="$1" _slot="$2"

@@ -9,17 +9,6 @@ _rand_snap_id() {
 }
 
 _snap_meta_get() { local f="$1/$2.meta"; [[ -f "$f" ]] && grep -m1 "^$3=" "$f" 2>/dev/null | cut -d= -f2- || printf ''; }
-_snap_meta_set() {
-    local sdir="$1" snap_id="$2"; shift 2
-    local f="$sdir/$snap_id.meta"; local tmp; tmp=$(mktemp)
-    [[ -f "$f" ]] && cp "$f" "$tmp" || true
-    for pair in "$@"; do
-        local k="${pair%%=*}" v="${pair#*=}"
-        sed -i "/^${k}=/d" "$tmp" 2>/dev/null || true
-        printf '%s=%s\n' "$k" "$v" >> "$tmp"
-    done
-    mv "$tmp" "$f" 2>/dev/null || true
-}
 
 _snap_meta_set() {
     local sdir="$1" snap_id="$2"; shift 2
@@ -40,7 +29,6 @@ _delete_snap() {
 }
 
 _delete_backup() { local sdir="$1" snap_id="$2"; _delete_snap "$sdir/$snap_id"; rm -f "$sdir/$snap_id.meta" 2>/dev/null || true; }
-
 
 _rotate_and_snapshot() {
     local cid="$1" install_path; install_path=$(_cpath "$cid")

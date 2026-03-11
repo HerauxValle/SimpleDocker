@@ -218,7 +218,6 @@ HELPERS
 
 _ct_ubuntu_stamp() { cat "${1}/.sd_ubuntu_stamp" 2>/dev/null; }
 
-
 _ct_ubuntu_ver() {
     local p="$1"
     grep -m1 '^VERSION_ID=' "${p}/etc/os-release" 2>/dev/null | cut -d= -f2 | tr -d '"'

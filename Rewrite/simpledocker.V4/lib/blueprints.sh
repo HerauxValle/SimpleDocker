@@ -323,7 +323,6 @@ _bp_cfg_set() {
 }
 
 _bp_persistent_enabled() { [[ "$(_bp_cfg_get persistent_blueprints)" != "false" ]]; }
-# autodetect_blueprints: "Home" (default) | "Root" | "Everywhere" | "Custom" | "Disabled"
 
 _bp_custom_paths_get() {
     jq -r '.custom_paths[]? // empty' "$(_bp_cfg)" 2>/dev/null
