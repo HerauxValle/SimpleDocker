@@ -1,0 +1,32 @@
+# [OpenWebUI]
+[container]
+[meta]
+name         = open-webui
+version      = 0.6.5
+port         = 3000
+dialogue     = Web UI for Ollama
+description  = Open WebUI — browser interface for local LLMs. Connects to Ollama automatically.
+storage_type = open-webui
+entrypoint   = venv/bin/open-webui serve
+pypi         = open-webui
+
+[env]
+OLLAMA_BASE_URL  = http://ollama:11434
+WEBUI_SECRET_KEY = generate:hex32
+DATA_DIR         = data
+PORT             = 3000
+HOST             = 0.0.0.0
+
+[storage]
+data
+
+[deps]
+python3
+
+[dirs]
+data, logs
+
+[pip]
+open-webui
+
+[/container]

@@ -1,0 +1,352 @@
+{
+  "_comment": "layout.json — simpleDocker menu tree. Mirrors exact current behavior. Paths relative to SimpleDocker/ root.",
+  "_types": {
+    "menu":    "{ } block — navigates into a submenu",
+    "entry":   "leaf item — calls a function and returns to menu",
+    "section": "visual separator ── Label ── no action"
+  },
+
+  "premount": {
+    "type": "menu",
+    "label": "simpleDocker",
+    "header": "── simpleDocker ──",
+    "fn": "_setup_image",
+    "items": [
+      { "type": "entry",   "label": "Select existing image",  "fn": "_pick_img" },
+      { "type": "entry",   "label": "Create new image",       "fn": "_create_img" },
+      { "type": "section", "label": "── Detected images ──",  "_note": "runtime-scanned BTRFS/LUKS .img files from $HOME" }
+    ]
+  },
+
+  "postmount": {
+    "type": "menu",
+    "label": "simpleDocker",
+    "header": "── simpleDocker ──  {img_label}",
+    "fn": "main_menu",
+    "items": [
+      { "type": "entry",   "label": "Containers",  "fn": "_containers_submenu",  "_icon": "◈ green" },
+      { "type": "entry",   "label": "Groups",      "fn": "_groups_menu",          "_icon": "▶ cyan"  },
+      { "type": "entry",   "label": "Blueprints",  "fn": "_blueprints_submenu",   "_icon": "◈ blue"  },
+      { "type": "section", "label": "── ──────────────────────────────── ──" },
+      { "type": "entry",   "label": "Other",       "fn": "_help_menu",            "_icon": "? dim"   },
+      { "type": "entry",   "label": "Quit",        "fn": "_quit_menu",            "_icon": "× red"   }
+    ]
+  },
+
+  "containers_submenu": {
+    "type": "menu",
+    "label": "Containers",
+    "header": "── Containers ──  [{count} · {running} ▶]",
+    "fn": "_containers_submenu",
+    "items": [
+      { "type": "section", "label": "── Containers ──",       "_note": "auto-populated list; each entry opens container_submenu" },
+      { "type": "entry",   "label": "+ New container",        "fn": "_create_container", "_icon": "green" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",                 "fn": "__back" }
+    ]
+  },
+
+  "container_submenu": {
+    "_comment": "Per-container menu. Items shown depend on container state.",
+    "type": "menu",
+    "label": "{container_name}",
+    "header": "{dot}  {name}  — {dialogue}  {ip}:{port}",
+    "fn": "_container_submenu",
+
+    "state_not_installed": {
+      "items": [
+        { "type": "section", "label": "── General ──" },
+        { "type": "entry",   "label": "↓  Install",     "fn": "_run_job install {cid}" },
+        { "type": "entry",   "label": "◦  Edit toml",   "fn": "_edit_container_bp {cid}" },
+        { "type": "entry",   "label": "✎  Rename",      "fn": "_rename_container {cid}" },
+        { "type": "section", "label": "── Caution ──" },
+        { "type": "entry",   "label": "×  Remove",      "fn": "__remove_container {cid}" }
+      ]
+    },
+
+    "state_installed_stopped": {
+      "items": [
+        { "type": "section", "label": "── General ──" },
+        { "type": "entry",   "label": "▶  Start",       "fn": "_start_container {cid}" },
+        { "type": "entry",   "label": "⊕  Open in",     "fn": "_open_in_submenu {cid}" },
+        { "type": "section", "label": "── Storage ──" },
+        { "type": "entry",   "label": "◈  Backups",     "fn": "_container_backups_menu {cid}" },
+        { "type": "entry",   "label": "◧  Profiles",    "fn": "_persistent_storage_menu {cid}" },
+        { "type": "entry",   "label": "◦  Edit toml",   "fn": "_edit_container_bp {cid}" },
+        { "type": "entry",   "label": "⬆  Updates",     "fn": "__updates_submenu {cid}", "_note": "only shown when updates available" },
+        { "type": "section", "label": "── Caution ──" },
+        { "type": "entry",   "label": "○  Uninstall",   "fn": "__uninstall_container {cid}" }
+      ]
+    },
+
+    "state_running": {
+      "items": [
+        { "type": "section", "label": "── General ──" },
+        { "type": "entry",   "label": "■  Stop",         "fn": "_stop_container {cid}" },
+        { "type": "entry",   "label": "↺  Restart",      "fn": "__restart_container {cid}" },
+        { "type": "entry",   "label": "→  Attach",       "fn": "_tmux_attach_hint {name} {sess}" },
+        { "type": "entry",   "label": "⊕  Open in",      "fn": "_open_in_submenu {cid}" },
+        { "type": "entry",   "label": "≡  View log",     "fn": "__view_log {cid}" },
+        { "type": "section", "label": "── Actions ──",   "_note": "custom [action] blocks from blueprint, one entry each" },
+        { "type": "section", "label": "── Cron ──",      "_note": "one entry per [cron] block; click attaches to cron tmux session" },
+        { "type": "entry",   "label": "⏱  {cron_name}  [{interval}]",  "_note": "green=running, dim=stopped" }
+      ]
+    },
+
+    "state_installing": {
+      "items": [
+        { "type": "section", "label": "── General ──" },
+        { "type": "entry",   "label": "→  Attach to installation",    "fn": "_tmux_attach_hint installation {inst_sess}" },
+        { "type": "entry",   "label": "✓  Finish installation",       "fn": "_process_install_finish {cid}", "_note": "shown when install_done=true" },
+        { "type": "entry",   "label": "✓  Finish update",             "fn": "_process_install_finish {cid}", "_note": "shown when was already installed" }
+      ]
+    }
+  },
+
+  "groups_menu": {
+    "type": "menu",
+    "label": "Groups",
+    "header": "── Groups ──  [{active}/{total}]",
+    "fn": "_groups_menu",
+    "items": [
+      { "type": "section", "label": "── Groups ──",   "_note": "auto-populated; each entry: dot  name  N/M running" },
+      { "type": "entry",   "label": "+ New group",    "fn": "_create_group", "_icon": "green" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",          "fn": "__back" }
+    ]
+  },
+
+  "group_submenu": {
+    "type": "menu",
+    "label": "{group_name}",
+    "header": "── {group_name} ──",
+    "fn": "_group_submenu",
+    "items": [
+      { "type": "section", "label": "── General ──" },
+      { "type": "entry",   "label": "▶  Start group",   "fn": "_start_group {gid}" },
+      { "type": "entry",   "label": "■  Stop group",    "fn": "_stop_group {gid}" },
+      { "type": "section", "label": "── Sequence ──",   "_note": "ordered steps; each line is Container or Wait; click to edit" },
+      { "type": "entry",   "label": "+ Add step",       "fn": "_grp_edit_step {gid}" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",            "fn": "__back" }
+    ]
+  },
+
+  "blueprints_submenu": {
+    "type": "menu",
+    "label": "Blueprints",
+    "header": "── Blueprints ──  [{file} file · {builtin} built-in · {imported} imported]",
+    "fn": "_blueprints_submenu",
+    "items": [
+      { "type": "section", "label": "── Blueprints ──",   "_note": "file=dim◈  persistent=blue◈  imported=cyan◈" },
+      { "type": "entry",   "label": "+ New blueprint",    "fn": "__new_blueprint", "_icon": "green" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",              "fn": "__back" }
+    ]
+  },
+
+  "blueprint_submenu": {
+    "type": "menu",
+    "label": "{blueprint_name}",
+    "header": "── {blueprint_name} ──",
+    "fn": "_blueprint_submenu",
+    "items": [
+      { "type": "entry",   "label": "◦  Edit",    "fn": "__bp_edit {name}" },
+      { "type": "entry",   "label": "✎  Rename",  "fn": "__bp_rename {name}" },
+      { "type": "entry",   "label": "×  Delete",  "fn": "__bp_delete {name}" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",      "fn": "__back" }
+    ]
+  },
+
+  "blueprints_settings_menu": {
+    "type": "menu",
+    "label": "Blueprints — Settings",
+    "header": "── Blueprints — Settings ──",
+    "fn": "_blueprints_settings_menu",
+    "items": [
+      { "type": "section", "label": "── General ──" },
+      { "type": "entry",   "label": "Persistent blueprints  {toggle}",  "_note": "toggles built-in blueprint visibility" },
+      { "type": "entry",   "label": "Autodetect blueprints  {toggle}",  "_note": "toggles .container file scanning" },
+      { "type": "section", "label": "── Scanned paths ──",              "_note": "custom scan paths; click any path to remove it" },
+      { "type": "entry",   "label": "+ Add path",                       "fn": "__bp_add_path" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",                           "fn": "__back" }
+    ]
+  },
+
+  "other_menu": {
+    "_comment": "Internally _help_menu. Shown as 'Other' in main menu.",
+    "type": "menu",
+    "label": "Other",
+    "header": "── Other ──  Ubuntu:{ubuntu_status}  Proxy:{proxy_status}",
+    "fn": "_help_menu",
+    "items": [
+      { "type": "section", "label": "── Storage ──" },
+      { "type": "entry",   "label": "Profiles & data",            "fn": "_persistent_storage_menu" },
+      { "type": "entry",   "label": "Backups",                    "fn": "_manage_backups_menu" },
+      { "type": "entry",   "label": "Blueprints",                 "fn": "_blueprints_settings_menu" },
+      { "type": "section", "label": "── Plugins ──" },
+      { "type": "entry",   "label": "Ubuntu base — {ubuntu_status}",  "fn": "_ubuntu_menu" },
+      { "type": "entry",   "label": "Caddy — {proxy_status}",         "fn": "_proxy_menu" },
+      { "type": "entry",   "label": "QRencode — {qr_status}",         "fn": "_qrencode_menu" },
+      { "type": "section", "label": "── Tools ──" },
+      { "type": "entry",   "label": "Active processes",           "fn": "_active_processes_menu" },
+      { "type": "entry",   "label": "Resource limits",            "fn": "_resources_menu" },
+      { "type": "entry",   "label": "Blueprint preset",           "fn": "__blueprint_preset_viewer" },
+      { "type": "section", "label": "── Caution ──" },
+      { "type": "entry",   "label": "View logs",                  "fn": "_logs_browser" },
+      { "type": "entry",   "label": "Clear cache",                "fn": "__clear_cache" },
+      { "type": "entry",   "label": "Resize image",               "fn": "_resize_image" },
+      { "type": "entry",   "label": "Manage Encryption",          "fn": "_enc_menu" },
+      { "type": "entry",   "label": "× Delete image file",        "fn": "__delete_image" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",                     "fn": "__back" }
+    ]
+  },
+
+  "proxy_menu": {
+    "type": "menu",
+    "label": "Reverse proxy",
+    "header": "── Reverse proxy ──  ns: 10.88.{idx}.0/24",
+    "fn": "_proxy_menu",
+    "items": [
+      { "type": "section", "label": "── Installation ──" },
+      { "type": "entry",   "label": "Caddy + mDNS — {install_status}",  "fn": "_proxy_install_caddy" },
+      { "type": "section", "label": "── Startup ──" },
+      { "type": "entry",   "label": "Running — {run_status}",            "fn": "__proxy_toggle_run" },
+      { "type": "entry",   "label": "Autostart — {autostart_status}",    "_note": "starts Caddy automatically when image is mounted" },
+      { "type": "section", "label": "── Rerouting ──",                   "_note": "one entry per route: cyan_url → container_name (proto  mDNS: x.local)" },
+      { "type": "entry",   "label": "+ Add URL",                         "fn": "__proxy_add_url" },
+      { "type": "section", "label": "── Port exposure ──",               "_note": "auto-populated: installed containers with ports; shows ip:port and exposure mode" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",                            "fn": "__back" }
+    ]
+  },
+
+  "ubuntu_menu": {
+    "type": "menu",
+    "label": "Ubuntu base",
+    "header": "── Ubuntu base ──  {version}  Size: {size}  [P]",
+    "fn": "_ubuntu_menu",
+    "items": [
+      { "type": "section", "label": "── Actions ──" },
+      { "type": "entry",   "label": "Updates",                "fn": "__ubuntu_updates" },
+      { "type": "entry",   "label": "Uninstall Ubuntu base",  "fn": "__ubuntu_uninstall" },
+      { "type": "section", "label": "── Default packages ──", "_note": "auto-populated from ubuntu_default_pkgs file" },
+      { "type": "section", "label": "── System packages ──",  "_note": "auto-populated from dpkg inside chroot" },
+      { "type": "section", "label": "── Packages ──",         "_note": "extra user-added packages" },
+      { "type": "entry",   "label": "+ Add package",          "fn": "__ubuntu_add_pkg" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",                 "fn": "__back" }
+    ]
+  },
+
+  "resources_menu": {
+    "type": "menu",
+    "label": "Resource limits",
+    "header": "── Resource limits ──  [{container_count} containers]",
+    "fn": "_resources_menu",
+    "items": [
+      { "type": "section", "label": "── Containers ──",   "_note": "auto-populated; shows [cgroups on] badge when enabled; click to open per-container config" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",              "fn": "__back" }
+    ]
+  },
+
+  "resources_container_menu": {
+    "_comment": "Per-container cgroup config, reached from resources_menu",
+    "type": "menu",
+    "label": "Resources: {name}",
+    "header": "── Resources: {name} ──\n  Limits apply on container restart via systemd cgroups.",
+    "items": [
+      { "type": "section", "label": "── Configuration ──" },
+      { "type": "entry",   "label": "{enabled_toggle}  — toggle cgroups on/off (applies on next start)" },
+      { "type": "entry",   "label": "CPU quota    {cpu_quota}   — e.g. 200% = 2 cores" },
+      { "type": "entry",   "label": "Memory max   {mem_max}     — e.g. 8G, 512M" },
+      { "type": "entry",   "label": "Memory+swap  {mem_swap}    — e.g. 10G" },
+      { "type": "entry",   "label": "CPU weight   {cpu_weight}  — 1-10000, default=100" },
+      { "type": "section", "label": "── Info ──" },
+      { "type": "entry",   "label": "GPU/VRAM     not configurable via cgroups (planned separately)",  "_display_only": true },
+      { "type": "entry",   "label": "Network      not configurable via cgroups (planned separately)",  "_display_only": true },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",  "fn": "__back" }
+    ]
+  },
+
+  "active_processes_menu": {
+    "type": "menu",
+    "label": "Active processes",
+    "header": "── Processes ──  [{active} active]  {gpu_hdr}",
+    "fn": "_active_processes_menu",
+    "items": [
+      { "type": "section", "label": "── Processes ──",   "_note": "running containers: label / stats / PID / session" },
+      { "type": "section", "label": "── Processes ──",   "_note": "background sd_ helper sessions" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",             "fn": "__back" }
+    ]
+  },
+
+  "port_exposure_menu": {
+    "type": "menu",
+    "label": "Port Exposure",
+    "header": "── Port Exposure ──",
+    "fn": "_port_exposure_menu",
+    "items": [
+      { "type": "section", "label": "── Containers ──",   "_note": "installed containers with ports; click to cycle isolated→localhost→public" },
+      { "type": "section", "label": "── Navigation ──" },
+      { "type": "entry",   "label": "← Back",              "fn": "__back" }
+    ]
+  },
+
+  "open_in_submenu": {
+    "type": "menu",
+    "label": "Open in — {name}",
+    "header": "── Open in: {name} ──",
+    "fn": "_open_in_submenu",
+    "_note": "Terminal (chroot shell), File manager (yazi), Browser (if port configured)"
+  },
+
+  "container_backups_menu": {
+    "type": "menu",
+    "label": "Backups",
+    "header": "── Backups: {name} ──",
+    "fn": "_container_backups_menu",
+    "_note": "Per-container snapshots: list, create manual backup, restore, delete, clone from snapshot"
+  },
+
+  "manage_backups_menu": {
+    "type": "menu",
+    "label": "Manage Backups",
+    "header": "── Backups ──",
+    "fn": "_manage_backups_menu",
+    "_note": "Image-wide backup browser: all containers, all snapshots, restore and delete"
+  },
+
+  "persistent_storage_menu": {
+    "type": "menu",
+    "label": "Profiles & data",
+    "header": "── Persistent storage ──",
+    "fn": "_persistent_storage_menu",
+    "_note": "Storage profiles: create, rename, delete, link/unlink to containers, export, import"
+  },
+
+  "encryption_menu": {
+    "type": "menu",
+    "label": "Manage Encryption",
+    "header": "── Encryption ──",
+    "fn": "_enc_menu",
+    "_note": "LUKS2 key slots, auto-unlock, verified system, auth keyfile management; structure varies by image encryption state"
+  },
+
+  "quit_menu": {
+    "type": "menu",
+    "label": "Quit",
+    "header": "── Quit ──",
+    "fn": "_quit_menu",
+    "items": [
+      { "type": "entry",   "label": "■  Stop all & quit",   "fn": "_quit_all" },
+      { "type": "entry",   "label": "Quit",                  "fn": "__quit_clean" }
+    ]
+  }
+}

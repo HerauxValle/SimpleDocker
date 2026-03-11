@@ -1,0 +1,53 @@
+# [Stash]
+[container]
+
+[meta]
+name         = stash
+version      = 0.29.0
+dialogue     = Video library organizer & player
+description  = Self-hosted web app for organizing, tagging, and streaming your video collection. Supports metadata scraping, performer/studio tracking, and stash-box integration.
+port         = 9999
+storage_type = stash
+log          = logs/stash.log
+health       = true
+
+[env]
+STASH_PORT        = 9999
+STASH_HOST        = 0.0.0.0
+STASH_CONFIG_FILE = config/config.yml
+
+[storage]
+data, config, logs, cache, blobs
+
+[deps]
+ffmpeg
+
+[dirs]
+bin
+data(scenes, images, galleries, videos)
+config
+logs
+cache
+blobs
+
+[git]
+stashapp/stash [stash-linux-amd64][BIN] → bin/
+
+[update]
+chmod +x bin/stash
+printf 'Update complete.\n'
+
+[start]
+exec bin/stash \
+    --host "$STASH_HOST" \
+    --port "$STASH_PORT" \
+    --config "$STASH_CONFIG_FILE"
+
+[cron]
+10m [backup-db] | cp config/stash-go.sqlite data/stash-backup-$(date +%F).sqlite >> logs/backup.log
+
+[actions]
+Backup database now | cp config/stash-go.sqlite data/stash-backup-$(date +%F).sqlite && printf 'Backup done.\n'
+Clear cache         | rm -rf cache/* && printf 'Cache cleared.\n'
+
+[/container]

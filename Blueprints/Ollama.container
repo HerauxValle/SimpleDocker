@@ -1,0 +1,36 @@
+# [Ollama]
+[container]
+[meta]
+name         = ollama
+version      = 0.9.0
+port         = 11434
+dialogue     = Local LLM server
+description  = Ollama — run LLMs locally. CUDA GPU acceleration auto-detected.
+storage_type = ollama
+entrypoint   = bin/ollama serve
+gpu          = cuda_auto
+
+[env]
+OLLAMA_HOST     = 0.0.0.0
+OLLAMA_PORT     = 11434
+OLLAMA_MODELS   = models
+LD_LIBRARY_PATH = lib/ollama
+
+[storage]
+models
+
+[deps]
+zstd, tar, curl
+
+[dirs]
+bin, models, logs, lib(ollama)
+
+[git]
+ollama/ollama → .
+
+[actions]
+Pull model   | prompt: "Model name (e.g. llama3.2, mistral):" | bin/ollama pull {input}
+List models  | bin/ollama list
+Remove model | select: bin/ollama list --skip-header --col 1 | bin/ollama rm {selection}
+
+[/container]
