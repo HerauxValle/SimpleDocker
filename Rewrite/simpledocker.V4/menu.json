@@ -1,0 +1,114 @@
+{
+  "_comment": "Declarative map of simpleDocker menus. This is documentation/API surface only — the TUI reads menus directly from bash (tui/*.sh). CLI uses this to enumerate available commands.",
+  "menus": {
+    "main": {
+      "entries": [
+        { "label": "Containers",  "icon": "◈", "color": "GRN", "submenu": "containers" },
+        { "label": "Groups",      "icon": "▶", "color": "CYN", "submenu": "groups" },
+        { "label": "Blueprints",  "icon": "◈", "color": "BLU", "submenu": "blueprints" },
+        { "type": "sep" },
+        { "label": "Other",       "icon": "?", "color": "DIM", "submenu": "other" },
+        { "label": "Quit",        "icon": "×", "color": "RED", "fn": "_quit_menu" }
+      ]
+    },
+    "containers": {
+      "dynamic": "container_list",
+      "entries": [
+        { "label": "New container", "icon": "+", "color": "GRN", "fn": "_install_method_menu" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "container_item": {
+      "header_fn": "_container_header",
+      "entries": [
+        { "label_key": "ct_attach_inst", "icon": "→", "color": "YLW", "fn": "_installing_menu",      "cond": "installing" },
+        { "label_key": "ct_finish_inst", "icon": "✓", "color": "GRN", "fn": "_process_install_finish","cond": "install_done" },
+        { "label_key": "ct_start",       "icon": "▶", "color": "GRN", "fn": "_start_container",       "cond": "installed_not_running" },
+        { "label_key": "ct_stop",        "icon": "■", "color": "RED", "fn": "_stop_container",        "cond": "running" },
+        { "label_key": "ct_restart",     "icon": "↺", "color": "YLW", "fn": "_stop_container+_start_container", "cond": "running" },
+        { "label_key": "ct_attach",      "icon": "→", "color": "GRN", "fn": "_tmux_attach_hint",      "cond": "running" },
+        { "label_key": "ct_open_in",     "icon": "⊕", "color": "DIM", "fn": "_open_in_submenu",       "cond": "running" },
+        { "label_key": "ct_log",         "icon": "≡", "color": "DIM", "fn": "_show_ct_log" },
+        { "type": "sep" },
+        { "dynamic": "container_actions", "cond": "installed" },
+        { "dynamic": "container_crons",   "cond": "installed" },
+        { "dynamic": "container_updates", "cond": "installed_not_running" },
+        { "type": "sep" },
+        { "label_key": "ct_backups",   "icon": "◈", "fn": "_container_backups_menu",  "cond": "installed" },
+        { "label_key": "ct_profiles",  "icon": "◧", "fn": "_persistent_storage_menu", "cond": "installed" },
+        { "label_key": "ct_exposure",  "icon": "⬤", "fn": "_port_exposure_menu" },
+        { "type": "sep" },
+        { "label_key": "ct_edit",      "icon": "◦", "fn": "_edit_container_bp" },
+        { "label_key": "ct_terminal",  "icon": "◉", "fn": "_chroot_bash",              "cond": "installed" },
+        { "label_key": "ct_rename",    "icon": "✎", "fn": "_rename_container",         "cond": "not_installed" },
+        { "label_key": "ct_uninstall", "icon": "○", "fn": "_do_umount",                "cond": "installed_not_running" },
+        { "label_key": "ct_remove",    "icon": "×", "color": "RED", "fn": "_delete_container", "cond": "not_installed" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "groups": {
+      "dynamic": "group_list",
+      "entries": [
+        { "label_key": "grp_new", "icon": "+", "color": "GRN", "fn": "_create_group" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "group_item": {
+      "entries": [
+        { "label": "▶  Start group",     "color": "GRN", "fn": "_start_group",  "cond": "grp_not_running" },
+        { "label": "■  Stop group",      "color": "RED", "fn": "_stop_group",   "cond": "grp_running" },
+        { "type": "sep" },
+        { "label": "⊕  Add container",  "fn": "_grp_pick_container" },
+        { "label": "≡  Edit sequence",   "fn": "_grp_edit_step" },
+        { "type": "sep" },
+        { "label": "×  Delete group",   "color": "RED", "fn": "_delete_group" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "blueprints": {
+      "dynamic": "blueprint_list",
+      "entries": [
+        { "label_key": "bp_new", "icon": "+", "color": "GRN", "fn": "_new_blueprint" },
+        { "label": "⚙  Settings", "fn": "_blueprints_settings_menu" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "blueprint_item": {
+      "entries": [
+        { "label_key": "bp_edit",   "icon": "◦", "fn": "_edit_blueprint_file" },
+        { "label_key": "bp_rename", "icon": "✎", "fn": "_rename_blueprint" },
+        { "label_key": "bp_delete", "icon": "×", "color": "RED", "fn": "_delete_blueprint" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    },
+    "other": {
+      "entries": [
+        { "label": "Persistent storage", "icon": "◈", "fn": "_persistent_storage_menu" },
+        { "label": "Backups",            "icon": "◈", "fn": "_manage_backups_menu" },
+        { "label": "Blueprints",         "icon": "◈", "fn": "_blueprints_settings_menu" },
+        { "type": "sep" },
+        { "label": "Ubuntu base",        "icon": "◈", "color": "CYN", "fn": "_ubuntu_menu" },
+        { "label": "Caddy",              "icon": "◈", "color": "CYN", "fn": "_proxy_menu" },
+        { "label": "QRencode",           "icon": "◈", "color": "CYN", "fn": "_qrencode_menu" },
+        { "label": "Manage Encryption",  "icon": "◈", "fn": "_enc_menu" },
+        { "type": "sep" },
+        { "label": "Active processes",   "icon": "◈", "fn": "_active_processes_menu" },
+        { "label": "Resource limits",    "icon": "◈", "fn": "_resources_menu" },
+        { "label": "Port Exposure",      "icon": "⬤", "fn": "_port_exposure_menu" },
+        { "label": "Resize image",       "icon": "▷", "fn": "_resize_image" },
+        { "label": "View logs",          "icon": "≡", "fn": "_logs_browser" },
+        { "label": "Blueprint preset",   "icon": "≡", "fn": "_show_blueprint_preset" },
+        { "type": "sep" },
+        { "label": "← Back", "fn": "back" }
+      ]
+    }
+  },
+  "hooks": {
+    "container_list":    { "fn": "build in _containers_submenu" },
+    "container_actions": { "fn": "from service.json .actions[]" },
+    "container_crons":   { "fn": "from service.json .crons[]" },
+    "container_updates": { "fn": "_build_update_items + _build_ubuntu_update_item + _build_pkg_update_item" },
+    "group_list":        { "fn": "build in _groups_menu" },
+    "blueprint_list":    { "fn": "build in _blueprints_submenu" }
+  }
+}
