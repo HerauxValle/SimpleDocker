@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_stor_path()          { printf '%s/%s' "$STORAGE_DIR" "$1"; }
+
+_stor_meta_path()     { printf '%s/.sd_meta.json' "$(_stor_path "$1")"; }
+
 _stor_meta_set() {
     local scid="$1"; shift
     local mp; mp=$(_stor_meta_path "$scid"); local tmp; tmp=$(mktemp)
@@ -11,6 +15,18 @@ _stor_meta_set() {
     done
     mv "$tmp" "$mp"
 }
+
+_stor_read_field()     { jq -r ".$2 // empty" "$(_stor_meta_path "$1")" 2>/dev/null; }
+
+_stor_read_name()      { _stor_read_field "$1" name; }
+
+_stor_read_type()      { _stor_read_field "$1" storage_type; }
+
+_stor_read_active()    { _stor_read_field "$1" active_container; }
+
+_stor_set_active()     { _stor_meta_set "$1" active_container "$2"; }
+
+_stor_clear_active()   { _stor_meta_set "$1" active_container ""; }
 
 _stor_type_from_sj() {
     local cid="$1"

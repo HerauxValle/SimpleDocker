@@ -1,16 +1,38 @@
 #!/usr/bin/env bash
 
+_proxy_cfg()       { printf '%s/.sd/proxy.json'    "$MNT_DIR"; }
+
 _proxy_caddyfile() { printf '%s/.sd/Caddyfile'     "$MNT_DIR"; }
+
+_proxy_pidfile()   { printf '%s/.sd/.caddy.pid'    "$MNT_DIR"; }
+
+_proxy_caddy_bin()     { printf '%s/.sd/caddy/caddy'       "$MNT_DIR"; }
 
 _proxy_caddy_storage() { printf '%s/.sd/caddy/data'        "$MNT_DIR"; }
 
+_proxy_caddy_runner()  { printf '%s/.sd/caddy/run.sh'      "$MNT_DIR"; }
+
+_proxy_caddy_log()     { printf '%s/.sd/caddy/caddy.log'   "$MNT_DIR"; }
+
+_proxy_get()       { jq -r ".$1 // empty" "$(_proxy_cfg)" 2>/dev/null; }
+
+_proxy_running()   { local p; p=$(cat "$(_proxy_pidfile)" 2>/dev/null); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
+
 _proxy_dns_pidfile() { printf '%s/.sd/caddy/dnsmasq.pid'  "$MNT_DIR"; }
+
+_proxy_dns_conf()    { printf '%s/.sd/caddy/dnsmasq.conf' "$MNT_DIR"; }
+
+_proxy_dns_log()     { printf '%s/.sd/caddy/dnsmasq.log'  "$MNT_DIR"; }
 
 _proxy_dns_running() { local p; p=$(cat "$(_proxy_dns_pidfile)" 2>/dev/null); [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null; }
 
 _hostpkg_flagfile() { printf '%s/.sd/.sd_hostpkg_%s' "$MNT_DIR" "$1"; }
 
 _hostpkg_installed() { [[ -f "$(_hostpkg_flagfile "$1")" ]]; }
+
+_hostpkg_mark()      { touch "$(_hostpkg_flagfile "$1")" 2>/dev/null; }
+
+_hostpkg_unmark()    { rm -f "$(_hostpkg_flagfile "$1")" 2>/dev/null; }
 
 _hostpkg_apt_sudoers_path() { printf '/etc/sudoers.d/simpledocker_apt_%s' "$(id -un)"; }
 

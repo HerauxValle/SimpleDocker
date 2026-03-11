@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_netns_name()  { printf 'sd_%s' "$(printf '%s' "${1:-$MNT_DIR}" | md5sum | cut -c1-8)"; }
+
+_netns_idx()   { printf '%d' $(( 0x$(printf '%s' "${1:-$MNT_DIR}" | md5sum | cut -c1-2) % 254 )); }
+
 _netns_hosts() { printf '%s/.sd/.netns_hosts' "${1:-$MNT_DIR}"; }
 
 _netns_setup() {
@@ -70,6 +74,10 @@ _netns_ct_del() {
 }
 
 _exposure_file() { printf '%s/exposure' "$CONTAINERS_DIR/$1"; }
+
+_exposure_get()  { local _v; _v=$(cat "$(_exposure_file "$1")" 2>/dev/null); case "$_v" in isolated|localhost|public) printf "%s" "$_v";; *) printf "localhost";; esac; }
+
+_exposure_set()  { printf '%s' "$2" > "$(_exposure_file "$1")"; }
 
 _exposure_next() {
     case "$(_exposure_get "$1")" in

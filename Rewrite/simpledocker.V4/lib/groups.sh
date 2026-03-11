@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 
+_grp_path()        { printf '%s/%s.toml' "$GROUPS_DIR" "$1"; }
+
+_grp_read_field()  { grep -m1 "^$2[[:space:]]*=" "$(_grp_path "$1")" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//' ; }
+
+_list_groups()     { for f in "$GROUPS_DIR"/*.toml; do [[ -f "$f" ]] && basename "${f%.toml}"; done; }
+
 _grp_containers() {
     # Returns unique container names from sequence (for status display etc.)
     local gid="$1"

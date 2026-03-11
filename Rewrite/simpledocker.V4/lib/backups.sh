@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+_snap_dir()     { printf '%s/%s' "$BACKUP_DIR" "$(_cname "$1")"; }
+
 _rand_snap_id() {
     local sdir="$1" id
     while true; do

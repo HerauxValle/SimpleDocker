@@ -314,6 +314,10 @@ _cr_prefix() {
     printf '$CONTAINER_ROOT/%s' "$v"
 }
 
+_bp_cfg()           { printf '%s/.sd/bp_settings.json' "$MNT_DIR"; }
+
+_bp_cfg_get()       { jq -r ".$1 // empty" "$(_bp_cfg)" 2>/dev/null; }
+
 _bp_cfg_set() {
     local key="$1" val="$2" tmp
     mkdir -p "$(dirname "$(_bp_cfg)")" 2>/dev/null
@@ -323,6 +327,8 @@ _bp_cfg_set() {
 }
 
 _bp_persistent_enabled() { [[ "$(_bp_cfg_get persistent_blueprints)" != "false" ]]; }
+
+_bp_autodetect_mode()    { local m; m=$(_bp_cfg_get autodetect_blueprints); printf '%s' "${m:-Home}"; }
 
 _bp_custom_paths_get() {
     jq -r '.custom_paths[]? // empty' "$(_bp_cfg)" 2>/dev/null

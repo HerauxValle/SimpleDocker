@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 
+_cron_sess()     { printf 'sdCron_%s_%s' "$1" "$2"; }
+
+_cron_next_file(){ printf '%s/cron_%s_next' "$CONTAINERS_DIR/$1" "$2"; }
+
 _cron_interval_secs() {
     local iv="$1"
     local num unit

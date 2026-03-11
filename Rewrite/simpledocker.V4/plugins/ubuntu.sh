@@ -78,8 +78,18 @@ UBUNTUSCRIPT
     [[ $_tl_rc -eq 1 ]] && { rm -f "$ubuntu_script"; return 1; }
 }
 
+_chroot_mount()     { local d="$1"
+    sudo -n mount --bind /proc "$d/proc" 2>/dev/null || true
+    sudo -n mount --bind /sys  "$d/sys"  2>/dev/null || true
+    sudo -n mount --bind /dev  "$d/dev"  2>/dev/null || true; }
+
+_chroot_umount()    { local d="$1"
+    sudo -n umount -lf "$d/dev" "$d/sys" "$d/proc" 2>/dev/null || true; }
+
 _chroot_mount_mnt() { _chroot_mount "$1"
     [[ -n "${2:-}" ]] && sudo -n mount --bind "$2" "$1/mnt" 2>/dev/null || true; }
+
+_chroot_umount_mnt(){ sudo -n umount -lf "$1/mnt" 2>/dev/null || true; _chroot_umount "$1"; }
 
 _ubuntu_pkg_list() {
     # Returns installed packages: name\tversion\tsys

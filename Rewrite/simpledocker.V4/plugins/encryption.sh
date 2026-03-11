@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 
+_luks_mapper()  { printf 'sd_%s' "$(basename "${1%.img}" | tr -dc 'a-zA-Z0-9_')"; }
+
+_luks_dev()     { printf '/dev/mapper/%s' "$(_luks_mapper "$1")"; }
+
 _luks_is_open() { [[ -b "$(_luks_dev "$1")" ]]; }
+
+_img_is_luks()  { sudo -n cryptsetup isLuks "$1" 2>/dev/null; }
 
 _luks_open() {
     local img="$1" mapper pass attempts=0
@@ -52,9 +58,21 @@ _enc_authkey_path() { printf '%s' "$MNT_DIR/.sd/auth.key"; }
 
 _enc_authkey_slot_file() { printf '%s' "$MNT_DIR/.sd/auth.slot"; }
 
+_enc_verified_dir()  { printf '%s' "$MNT_DIR/.sd/verified"; }
+
+_enc_verified_id()   { sha256sum /etc/machine-id 2>/dev/null | cut -c1-8; }
+
 _enc_verified_pass() { sha256sum /etc/machine-id 2>/dev/null | cut -c1-32 || printf '%s' "simpledocker_fallback"; }
 
 _enc_verified_path() { printf '%s/%s' "$(_enc_verified_dir)" "$(_enc_verified_id)"; }
+
+_enc_is_verified()   { [[ -f "$(_enc_verified_path)" ]]; }
+
+_enc_vs_slot()    { local _f="$(_enc_verified_dir)/$1"; [[ -f "$_f" ]] && sed -n '2p' "$_f" 2>/dev/null || printf ''; }
+
+_enc_vs_hostname(){ local _f="$(_enc_verified_dir)/$1"; [[ -f "$_f" ]] && sed -n '1p' "$_f" 2>/dev/null || printf "$1"; }
+
+_enc_vs_pass()    { local _f="$(_enc_verified_dir)/$1"; [[ -f "$_f" ]] && sed -n '3p' "$_f" 2>/dev/null || printf ''; }
 
 _enc_vs_write() {
     local _id="$1" _slot="$2"
