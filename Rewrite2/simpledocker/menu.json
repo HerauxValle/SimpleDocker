@@ -1,0 +1,507 @@
+{
+  "menus": {
+    "main": {
+      "entries": [
+        {
+          "label": "Containers",
+          "icon": "\u25c8",
+          "color": "GRN",
+          "action": "menu:containers"
+        },
+        {
+          "label": "Groups",
+          "icon": "\u25b6",
+          "color": "CYN",
+          "action": "menu:groups"
+        },
+        {
+          "label": "Blueprints",
+          "icon": "\u25c8",
+          "color": "BLU",
+          "action": "menu:blueprints"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "Other",
+          "icon": "?",
+          "color": "DIM",
+          "action": "menu:other"
+        },
+        {
+          "label": "Quit",
+          "icon": "\u00d7",
+          "color": "RED",
+          "action": "fn:_quit_menu"
+        }
+      ],
+      "header_fn": "_main_menu_header"
+    },
+    "containers": {
+      "header": "Containers",
+      "entries": [
+        {
+          "type": "dynamic",
+          "hook": "container_list"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "New container",
+          "icon": "+",
+          "color": "GRN",
+          "action": "fn:_install_method_menu"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "container_item": {
+      "header_fn": "_container_header",
+      "entries": [
+        {
+          "label_key": "ct_attach_inst",
+          "icon": "\u2192",
+          "color": "YLW",
+          "action": "fn:_attach_install",
+          "cond": "installing"
+        },
+        {
+          "label_key": "ct_finish_inst",
+          "icon": "\u2713",
+          "color": "GRN",
+          "action": "fn:_finish_install",
+          "cond": "install_done"
+        },
+        {
+          "label_key": "ct_start",
+          "icon": "\u25b6",
+          "color": "GRN",
+          "action": "fn:_start_container",
+          "cond": "not_running_installed"
+        },
+        {
+          "label_key": "ct_stop",
+          "icon": "\u25a0",
+          "color": "RED",
+          "action": "fn:_stop_container",
+          "cond": "running"
+        },
+        {
+          "label_key": "ct_restart",
+          "icon": "\u21ba",
+          "color": "YLW",
+          "action": "fn:_restart_container",
+          "cond": "running"
+        },
+        {
+          "label_key": "ct_attach",
+          "icon": "\u2192",
+          "color": "GRN",
+          "action": "fn:_attach_container",
+          "cond": "running"
+        },
+        {
+          "label_key": "ct_open_in",
+          "icon": "\u2295",
+          "color": "DIM",
+          "action": "fn:_open_in_submenu",
+          "cond": "running"
+        },
+        {
+          "label_key": "ct_log",
+          "icon": "\u2261",
+          "color": "DIM",
+          "action": "fn:_show_ct_log",
+          "cond": "running"
+        },
+        {
+          "type": "sep",
+          "cond": "running"
+        },
+        {
+          "type": "dynamic",
+          "hook": "container_actions"
+        },
+        {
+          "type": "dynamic",
+          "hook": "container_crons"
+        },
+        {
+          "type": "sep",
+          "cond": "installed"
+        },
+        {
+          "label_key": "ct_start",
+          "icon": "\u25b6",
+          "color": "GRN",
+          "action": "fn:_start_container",
+          "cond": "installed_not_running"
+        },
+        {
+          "label_key": "ct_open_in",
+          "icon": "\u2295",
+          "color": "DIM",
+          "action": "fn:_open_in_submenu",
+          "cond": "installed_not_running"
+        },
+        {
+          "label_key": "ct_backups",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_container_backups_menu",
+          "cond": "installed"
+        },
+        {
+          "label_key": "ct_profiles",
+          "icon": "\u25e7",
+          "color": "DIM",
+          "action": "fn:_persistent_storage_menu",
+          "cond": "installed"
+        },
+        {
+          "label_key": "ct_edit",
+          "icon": "\u25e6",
+          "color": "DIM",
+          "action": "fn:_edit_container_bp",
+          "cond": "installed"
+        },
+        {
+          "type": "dynamic",
+          "hook": "container_updates"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label_key": "ct_install",
+          "icon": "\u2193",
+          "color": "DIM",
+          "action": "fn:_install_container",
+          "cond": "not_installed"
+        },
+        {
+          "label_key": "ct_edit",
+          "icon": "\u25e6",
+          "color": "DIM",
+          "action": "fn:_edit_container_bp",
+          "cond": "not_installed"
+        },
+        {
+          "label_key": "ct_rename",
+          "icon": "\u2261",
+          "color": "DIM",
+          "action": "fn:_rename_container_menu"
+        },
+        {
+          "label_key": "ct_uninstall",
+          "icon": "\u2193",
+          "color": "DIM",
+          "action": "fn:_uninstall_container",
+          "cond": "installed"
+        },
+        {
+          "label_key": "ct_remove",
+          "icon": "\u00d7",
+          "color": "RED",
+          "action": "fn:_remove_container",
+          "cond": "not_installed"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "groups": {
+      "header": "Groups",
+      "entries": [
+        {
+          "type": "dynamic",
+          "hook": "group_list"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "New group",
+          "icon": "+",
+          "color": "GRN",
+          "action": "fn:_create_group_menu"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "group_item": {
+      "header_fn": "_group_header",
+      "entries": [
+        {
+          "label": "\u25b6  Start group",
+          "color": "GRN",
+          "action": "fn:_start_group",
+          "cond": "grp_not_running"
+        },
+        {
+          "label": "\u25a0  Stop group",
+          "color": "RED",
+          "action": "fn:_stop_group",
+          "cond": "grp_running"
+        },
+        {
+          "label": "\u2261  Edit name/desc",
+          "color": "DIM",
+          "action": "fn:_edit_group",
+          "cond": "grp_not_running"
+        },
+        {
+          "label": "\u00d7  Delete group",
+          "color": "RED",
+          "action": "fn:_delete_group",
+          "cond": "grp_not_running"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "type": "dynamic",
+          "hook": "group_steps"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "+  Add step",
+          "color": "GRN",
+          "action": "fn:_add_group_step"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "blueprints": {
+      "header": "Blueprints",
+      "entries": [
+        {
+          "type": "dynamic",
+          "hook": "blueprint_list"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "New blueprint",
+          "icon": "+",
+          "color": "GRN",
+          "action": "fn:_new_blueprint_menu"
+        },
+        {
+          "label": "\u2699  Settings",
+          "icon": "\u2699",
+          "color": "DIM",
+          "action": "fn:_blueprints_settings_menu"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "blueprint_item": {
+      "header_fn": "_blueprint_header",
+      "entries": [
+        {
+          "label_key": "bp_edit",
+          "icon": "\u25e6",
+          "action": "fn:_edit_blueprint"
+        },
+        {
+          "label_key": "bp_rename",
+          "icon": "\u2261",
+          "action": "fn:_rename_blueprint"
+        },
+        {
+          "label_key": "bp_delete",
+          "icon": "\u00d7",
+          "color": "RED",
+          "action": "fn:_delete_blueprint"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    },
+    "other": {
+      "header": "Other",
+      "entries": [
+        {
+          "type": "sep_label",
+          "label": "Storage"
+        },
+        {
+          "label": "Profiles & data",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_persistent_storage_menu"
+        },
+        {
+          "label": "Backups",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_manage_backups_menu"
+        },
+        {
+          "label": "Blueprints",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_blueprints_settings_menu"
+        },
+        {
+          "type": "sep_label",
+          "label": "Plugins"
+        },
+        {
+          "label": "Ubuntu base",
+          "icon": "\u25c8",
+          "color": "CYN",
+          "action": "fn:_ubuntu_menu",
+          "status_fn": "_ubuntu_status"
+        },
+        {
+          "label": "Caddy",
+          "icon": "\u25c8",
+          "color": "CYN",
+          "action": "fn:_proxy_menu",
+          "status_fn": "_caddy_status"
+        },
+        {
+          "label": "QRencode",
+          "icon": "\u25c8",
+          "color": "CYN",
+          "action": "fn:_qrencode_menu",
+          "status_fn": "_qrencode_status"
+        },
+        {
+          "type": "sep_label",
+          "label": "Tools"
+        },
+        {
+          "label": "Active processes",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_active_processes_menu"
+        },
+        {
+          "label": "Resource limits",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_resources_menu"
+        },
+        {
+          "label": "Blueprint preset",
+          "icon": "\u2261",
+          "color": "DIM",
+          "action": "fn:_show_blueprint_preset"
+        },
+        {
+          "type": "sep_label",
+          "label": "Caution"
+        },
+        {
+          "label": "View logs",
+          "icon": "\u2261",
+          "color": "DIM",
+          "action": "fn:_logs_browser"
+        },
+        {
+          "label": "Clear cache",
+          "icon": "\u2298",
+          "color": "DIM",
+          "action": "fn:_clear_cache"
+        },
+        {
+          "label": "Resize image",
+          "icon": "\u25b7",
+          "color": "DIM",
+          "action": "fn:_resize_image"
+        },
+        {
+          "label": "Manage Encryption",
+          "icon": "\u25c8",
+          "color": "DIM",
+          "action": "fn:_enc_menu"
+        },
+        {
+          "label": "Delete image file",
+          "icon": "\u00d7",
+          "color": "RED",
+          "action": "fn:_delete_image_file"
+        },
+        {
+          "type": "sep"
+        },
+        {
+          "label": "Port Exposure",
+          "icon": "\u2b24",
+          "color": "DIM",
+          "action": "fn:_port_exposure_menu"
+        },
+        {
+          "label": "\u2190 Back",
+          "color": "DIM",
+          "action": "back"
+        }
+      ]
+    }
+  },
+  "hooks": {
+    "container_list": {
+      "fn": "_hook_container_list"
+    },
+    "container_actions": {
+      "fn": "_hook_container_actions",
+      "args": [
+        "cid"
+      ]
+    },
+    "container_crons": {
+      "fn": "_hook_container_crons",
+      "args": [
+        "cid"
+      ]
+    },
+    "container_updates": {
+      "fn": "_hook_container_updates",
+      "args": [
+        "cid"
+      ]
+    },
+    "group_list": {
+      "fn": "_hook_group_list"
+    },
+    "group_steps": {
+      "fn": "_hook_group_steps",
+      "args": [
+        "gid"
+      ]
+    },
+    "blueprint_list": {
+      "fn": "_hook_blueprint_list"
+    }
+  }
+}
