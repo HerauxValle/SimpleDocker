@@ -221,28 +221,32 @@ LOGS_DIR=""
 _stor_ctx_cid=""  # set before calling _persistent_storage_menu from container context
 
 _chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
+    local root="$1"; shift
+    local bash_bin
+    if [[ -f "$root/bin/bash" || -L "$root/bin/bash" ]]; then
+        bash_bin=/bin/bash
+    elif [[ -f "$root/usr/bin/bash" ]]; then
+        bash_bin=/usr/bin/bash
+    else
+        bash_bin=/bin/bash  # fallback, let chroot report the error
+    fi
+    sudo -n chroot "$root" "$bash_bin" "$@"
 }
 
 _check_deps() {
-    # arg $1: "ask" (default) | "yes" = install without prompt | "no" = exit if missing
-    local _mode="${1:-ask}"
     local missing=()
     for t in jq tmux yazi fzf btrfs sudo curl ip; do
         command -v "$t" &>/dev/null || missing+=("$t")
     done
-    [[ ${#missing[@]} -eq 0 ]] && return 0
-    if [[ "$_mode" == "no" ]]; then
-        printf 'Missing required tools: %s\n' "${missing[*]}" >&2
-        exit 1
-    fi
-    if [[ "$_mode" == "ask" ]]; then
-        return 1   # caller (TUI) handles prompt and calls again with "yes"
-    fi
-    # mode == "yes": install
+    [[ ${#missing[@]} -eq 0 ]] && return
+    clear
+    local ans
+    ans=$(printf '%s\n' "Yes, install them" "No, exit" \
+        | fzf --ansi --no-sort --prompt="  ❯ " --pointer="▶" \
+              --height=40% --reverse --border=rounded --margin=1,2 --no-info \
+              --header="$(printf "  Required: jq tmux yazi fzf btrfs-progs sudo curl iproute2\n  Missing:  %s\n\n  Install missing tools?" "${missing[*]}")" \
+              2>/dev/null)
+    [[ "$ans" != "Yes, install them" ]] && clear && exit 1
     local pm_cmd=""
     if   command -v pacman  &>/dev/null; then pm_cmd="sudo pacman -S --noconfirm"
     elif command -v apt-get &>/dev/null; then pm_cmd="sudo apt-get install -y"
@@ -255,27 +259,7 @@ _check_deps() {
         $pm_cmd "$t" &>/dev/null
     done
 }
-_check_deps_missing() {
-    local missing=()
-    for t in jq tmux yazi fzf btrfs sudo curl ip; do
-        command -v "$t" &>/dev/null || missing+=("$t")
-    done
-    printf '%s' "${missing[*]}"
-}
-# TUI wrapper: prompt if deps missing, then install
-if ! _check_deps ask; then
-    _sd_missing=$(_check_deps_missing)
-    clear
-    _sd_ans=$(printf '%s
-' "Yes, install them" "No, exit" \
-        | fzf --ansi --no-sort --prompt="  ❯ " --pointer="▶" \
-              --height=40% --reverse --border=rounded --margin=1,2 --no-info \
-              --header="$(printf "  Required: jq tmux yazi fzf btrfs-progs sudo curl iproute2\n  Missing:  %s\n\n  Install missing tools?" "$_sd_missing")" \
-              2>/dev/null)
-    [[ "$_sd_ans" != "Yes, install them" ]] && clear && exit 1
-    _check_deps yes
-fi
-unset _sd_missing _sd_ans
+_check_deps
 
 SD_USERNS_OK=false   # kept for compatibility; never set to true
 
@@ -303,7 +287,7 @@ if [[ -z "$TMUX" ]]; then
         local _me; _me=$(id -un)
         local _sudoers="/etc/sudoers.d/simpledocker_${_me}"
         local _rule
-        _rule=$(printf '%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/mount, /usr/bin/umount, /usr/bin/btrfs, /usr/sbin/btrfs, /bin/btrfs, /sbin/btrfs, /usr/bin/mkfs.btrfs, /sbin/mkfs.btrfs, /usr/bin/chown, /bin/chown, /bin/mkdir, /usr/bin/mkdir, /usr/bin/rm, /bin/rm, /usr/bin/chmod, /bin/chmod, /usr/bin/tee /etc/hosts, /usr/bin/nsenter, /usr/sbin/nsenter, /usr/bin/unshare, /usr/bin/chroot, /usr/sbin/chroot, /bin/bash, /usr/bin/bash, /usr/bin/ip, /bin/ip, /sbin/ip, /usr/sbin/ip, /usr/sbin/iptables, /usr/bin/iptables, /sbin/iptables, /usr/sbin/sysctl, /usr/bin/sysctl, /bin/cp, /usr/bin/cp, /usr/bin/apt-get, /usr/bin/apt, /usr/sbin/cryptsetup, /usr/bin/cryptsetup, /sbin/cryptsetup, /sbin/losetup, /usr/sbin/losetup, /bin/losetup, /sbin/blockdev, /usr/sbin/blockdev, /usr/bin/dmsetup, /usr/sbin/dmsetup, /usr/bin/rsync\n' "$_me")
+        _rule=$(printf '%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/mount, /usr/bin/umount, /usr/bin/btrfs, /usr/sbin/btrfs, /bin/btrfs, /sbin/btrfs, /usr/bin/mkfs.btrfs, /sbin/mkfs.btrfs, /usr/bin/chown, /bin/chown, /bin/mkdir, /usr/bin/mkdir, /usr/bin/rm, /bin/rm, /usr/bin/chmod, /bin/chmod, /usr/bin/tee /etc/hosts, /usr/bin/nsenter, /usr/sbin/nsenter, /usr/bin/unshare, /usr/bin/chroot, /usr/sbin/chroot, /bin/bash, /usr/bin/bash, /usr/bin/ip, /bin/ip, /sbin/ip, /usr/sbin/ip, /usr/sbin/iptables, /usr/bin/iptables, /sbin/iptables, /usr/sbin/sysctl, /usr/bin/sysctl, /bin/cp, /usr/bin/cp, /usr/bin/apt-get, /usr/bin/apt, /usr/sbin/cryptsetup, /usr/bin/cryptsetup, /sbin/cryptsetup, /sbin/losetup, /usr/sbin/losetup, /bin/losetup, /sbin/blockdev, /usr/sbin/blockdev\n' "$_me")
         printf '\n  \033[1m── simpleDocker ──\033[0m\n'
         printf '  \033[2msimpleDocker requires sudo access.\033[0m\n\n'
         sudo -k 2>/dev/null
@@ -335,62 +319,21 @@ if [[ -z "$TMUX" ]]; then
 fi
 
 _force_quit() {
-    # Kill all container and installation sessions
     if [[ -n "$CONTAINERS_DIR" ]]; then
         for d in "$CONTAINERS_DIR"/*/; do
             [[ -f "$d/state.json" ]] || continue
             local _cid; _cid=$(basename "$d"); local _s; _s="$(tsess "$_cid")"
-            if tmux_up "$_s"; then
-                tmux send-keys -t "$_s" C-c "" 2>/dev/null
-                sleep 0.2
-                tmux kill-session -t "$_s" 2>/dev/null || true
-            fi
+            tmux_up "$_s" && { tmux send-keys -t "$_s" C-c "" 2>/dev/null; sleep 0.2; tmux kill-session -t "$_s" 2>/dev/null || true; }
             if _is_installing "$_cid" && [[ ! -f "$d.install_ok" && ! -f "$d.install_fail" ]]; then
                 touch "$d.install_fail" 2>/dev/null || true
             fi
         done
     fi
-    tmux list-sessions -F "#{session_name}" 2>/dev/null | grep -E "^sdInst_|^sdCron_" | xargs -I{} tmux kill-session -t {} 2>/dev/null || true
-
-    # Recursively unmount EVERYTHING under SD_MNT_BASE
-    local _all_submounts
-    _all_submounts=$(findmnt -n -o TARGET -R "$SD_MNT_BASE" 2>/dev/null | grep -v "^$SD_MNT_BASE$" | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
-    if [[ -n "$_all_submounts" ]]; then
-        while IFS= read -r _sm; do
-            sudo -n umount -lf "$_sm" 2>/dev/null || true
-        done <<< "$_all_submounts"
-    fi
-
-    # Unmount and close the main image
+    tmux list-sessions -F "#{session_name}" 2>/dev/null | grep "^sdInst_" | xargs -I{} tmux kill-session -t {} 2>/dev/null || true
     _unmount_img
-
-    # Sweep any remaining mnt_* dirs
-    for _mnt in "$SD_MNT_BASE"/mnt_*/; do
-        [[ -d "$_mnt" ]] || continue
-        sudo -n umount -lf "$_mnt" 2>/dev/null || true
-        local _mlo; _mlo=$(findmnt -n -o SOURCE "$_mnt" 2>/dev/null | grep '^/dev/loop')
-        [[ -n "$_mlo" ]] && sudo -n losetup -d "$_mlo" 2>/dev/null || true
-        rmdir "$_mnt" 2>/dev/null || true
-    done
-
-    # Close any LUKS mappers that are still open (sd_* pattern) and detach loop devices
-    for _mp in /dev/mapper/sd_*; do
-        [[ -b "$_mp" ]] || continue
-        local _sd_dm_name="${_mp##*/}"
-        local _sd_dm_lo; _sd_dm_lo=$(sudo -n cryptsetup status "$_sd_dm_name" 2>/dev/null | grep 'device:' | awk '{print $2}')
-        sudo -n cryptsetup close "$_sd_dm_name" 2>/dev/null || true
-        [[ -n "$_sd_dm_lo" && "$_sd_dm_lo" == /dev/loop* ]] && sudo -n losetup -d "$_sd_dm_lo" 2>/dev/null || true
-    done
-
-    # Cleanup any other loop devices backing simpleDocker images
-    sudo -n losetup -a 2>/dev/null | grep "simpleDocker" | cut -d: -f1 | while read -r _sd_lo; do
-        sudo -n losetup -d "$_sd_lo" 2>/dev/null || true
-    done
-
     rm -rf "$SD_MNT_BASE" 2>/dev/null || true
-    # Final tmux cleanup: force exit of all clients in the main session
     tmux kill-session -t "simpleDocker" 2>/dev/null || true
-    clear; exit 0
+    exit 0
 }
 trap '_force_quit' INT TERM HUP
 stty -ixon 2>/dev/null || true
@@ -478,13 +421,11 @@ _set_img_dirs() {
     UBUNTU_DIR="$MNT_DIR/Ubuntu"
     GROUPS_DIR="$MNT_DIR/Groups"
     LOGS_DIR="$MNT_DIR/Logs"
-    CACHE_DIR="$MNT_DIR/.cache"
     mkdir -p "$BLUEPRINTS_DIR" "$CONTAINERS_DIR" "$INSTALLATIONS_DIR" "$BACKUP_DIR" \
-             "$STORAGE_DIR" "$UBUNTU_DIR" "$GROUPS_DIR" "$LOGS_DIR" "$CACHE_DIR/gh_tag" "$CACHE_DIR/sd_size" 2>/dev/null
+             "$STORAGE_DIR" "$UBUNTU_DIR" "$GROUPS_DIR" "$LOGS_DIR" 2>/dev/null
     sudo -n chown "$(id -u):$(id -g)" \
         "$BLUEPRINTS_DIR" "$CONTAINERS_DIR" "$INSTALLATIONS_DIR" "$BACKUP_DIR" \
-        "$STORAGE_DIR" "$UBUNTU_DIR" "$GROUPS_DIR" "$LOGS_DIR" "$CACHE_DIR" 2>/dev/null || true
-    _validate_containers  # check install paths once per mount, not on every nav
+        "$STORAGE_DIR" "$UBUNTU_DIR" "$GROUPS_DIR" "$LOGS_DIR" 2>/dev/null || true
     _sd_ub_cache_check &  # background — results written to tmp files, read on first menu open
 }
 
@@ -502,16 +443,8 @@ _sd_ub_cache_check() {
     else
         printf 'true' > "$_drift_f"
     fi
-    local _last_upd_file="$UBUNTU_DIR/.sd_last_apt_update"
-    local _now; _now=$(date +%s)
-    local _last=0; [[ -f "$_last_upd_file" ]] && _last=$(cat "$_last_upd_file" 2>/dev/null || echo 0)
-    if [[ $(( _now - _last )) -gt 86400 ]]; then
-        local _sim; _sim=$(_chroot_bash "$UBUNTU_DIR" -c "apt-get update -qq 2>/dev/null; apt-get --simulate upgrade 2>/dev/null | grep -c '^Inst '" 2>/dev/null)
-        [[ "${_sim:-0}" -gt 0 ]] && printf 'true' > "$_upd_f" || printf 'false' > "$_upd_f"
-        printf '%s' "$_now" > "$_last_upd_file" 2>/dev/null || true
-    else
-        printf 'false' > "$_upd_f"
-    fi
+    local _sim; _sim=$(_chroot_bash "$UBUNTU_DIR" -c         "apt-get update -qq 2>/dev/null; apt-get --simulate upgrade 2>/dev/null | grep -c '^Inst '" 2>/dev/null)
+    [[ "${_sim:-0}" -gt 0 ]] && printf 'true' > "$_upd_f" || printf 'false' > "$_upd_f"
 }
 
 _sd_ub_cache_read() {
@@ -1240,25 +1173,12 @@ _enc_menu() {
 _mount_img() {
     IMG_PATH="$1"
     MNT_DIR="${SD_MNT_BASE}/mnt_$(basename "${1%.img}")"
-    
-    if mountpoint -q "$MNT_DIR" 2>/dev/null; then
-        # Already mounted, but let's ensure we update dirs
-        _set_img_dirs
-        return 0
-    fi
-
     mkdir -p "$MNT_DIR" 2>/dev/null
     if _img_is_luks "$1"; then
         _luks_open "$1" || { rmdir "$MNT_DIR" 2>/dev/null; pause "Failed to unlock image."; return 1; }
         sudo -n mount -o compress=zstd "$(_luks_dev "$1")" "$MNT_DIR" 2>/dev/null
     else
-        # Avoid creating multiple loop devices for the same file
-        local _lo; _lo=$(sudo -n losetup -j "$1" 2>/dev/null | cut -d: -f1 | head -1)
-        if [[ -n "$_lo" ]]; then
-            sudo -n mount -o compress=zstd "$_lo" "$MNT_DIR" 2>/dev/null
-        else
-            sudo -n mount -o loop,compress=zstd "$1" "$MNT_DIR" 2>/dev/null
-        fi
+        sudo -n mount -o loop,compress=zstd "$1" "$MNT_DIR" 2>/dev/null
     fi
     sudo -n chown "$(id -u):$(id -g)" "$MNT_DIR" 2>/dev/null || true
     rm -rf "$TMP_DIR" 2>/dev/null || true
@@ -1295,63 +1215,26 @@ _pick_dir() { _yazi_pick; }
 
 _unmount_img() {
     [[ -z "$MNT_DIR" ]] && return 0
-    
-    # 1. Stop services
+    mountpoint -q "$MNT_DIR" 2>/dev/null || { rmdir "$MNT_DIR" 2>/dev/null; return 0; }
     _proxy_stop 2>/dev/null || true
     _netns_teardown "$MNT_DIR"
-
-    # 2. Recursively unmount everything under MNT_DIR
-    local _submounts
-    _submounts=$(findmnt -n -o TARGET -R "$MNT_DIR" 2>/dev/null | grep -v "^$MNT_DIR$" | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
-    if [[ -n "$_submounts" ]]; then
-        while IFS= read -r _sm; do
-            sudo -n umount -lf "$_sm" 2>/dev/null || true
-        done <<< "$_submounts"
-    fi
-
-    # 3. Find loop device(s) and mapper(s) before unmounting the main point
-    local _lo=""; [[ -n "$IMG_PATH" ]] && _lo=$(sudo -n losetup -j "$IMG_PATH" 2>/dev/null | cut -d: -f1)
-    [[ -z "$_lo" ]] && _lo=$(findmnt -n -o SOURCE "$MNT_DIR" 2>/dev/null | grep '^/dev/loop')
-
-    # 4. Unmount the main mount point
     sudo -n umount -lf "$MNT_DIR" 2>/dev/null || true
     rmdir "$MNT_DIR" 2>/dev/null || true
-
-    # 5. Close LUKS if applicable
-    if [[ -n "$IMG_PATH" ]]; then
-        # Try finding mapper by name pattern
-        local _lm; _lm=$(_luks_mapper "$IMG_PATH")
-        # Also try finding any mapper backing the loop devices
-        local _all_los; _all_los=$(sudo -n losetup -j "$IMG_PATH" 2>/dev/null | cut -d: -f1)
-        for _l in $_all_los; do
-            local _dm; _dm=$(sudo -n dmsetup ls --target crypt 2>/dev/null | grep -F "$_l" | awk '{print $1}')
-            [[ -n "$_dm" ]] && sudo -n cryptsetup close "$_dm" 2>/dev/null || true
-        done
-        [[ -b "/dev/mapper/$_lm" ]] && sudo -n cryptsetup close "$_lm" 2>/dev/null || true
-    fi
-
-    # 6. Detach loop device(s)
-    if [[ -n "$IMG_PATH" ]]; then
-        local _all_los; _all_los=$(sudo -n losetup -j "$IMG_PATH" 2>/dev/null | cut -d: -f1)
-        for _l in $_all_los; do
-            sudo -n losetup -d "$_l" 2>/dev/null || true
-        done
-    fi
-    [[ -n "$_lo" ]] && sudo -n losetup -d "$_lo" 2>/dev/null || true
-
+    [[ -n "$IMG_PATH" ]] && _luks_close "$IMG_PATH" 2>/dev/null || true
     TMP_DIR="$SD_MNT_BASE/.tmp"
     mkdir -p "$TMP_DIR" 2>/dev/null || true
 }
 
 _create_img() {
-    # args: $1=name $2=size_gb(default 50) $3=dir
-    local name="${1//[^a-zA-Z0-9_\-]/}"
-    local size_gb="${2:-50}"
-    local dir="$3"
-    local imgfile
+    local name size_gb dir imgfile
+    finput "$(printf "Image name (e.g. simpleDocker):\n\n  %b  The name cannot be changed after creation." "${RED}⚠  WARNING:${NC}")" || return 1
+    name="${FINPUT_RESULT//[^a-zA-Z0-9_\-]/}"
     [[ -z "$name" ]] && { pause "No name given."; return 1; }
+    finput "Max size in GB (sparse — only uses actual disk space, leave blank for 50 GB):" || return 1
+    size_gb="$FINPUT_RESULT"
+    [[ -z "$size_gb" ]] && size_gb=50
     [[ ! "$size_gb" =~ ^[0-9]+$ || "$size_gb" -lt 1 ]] && { pause "Invalid size."; return 1; }
-    [[ -z "$dir" ]] && { pause "No directory selected."; return 1; }
+    dir=$(_pick_dir) || { pause "No directory selected."; return 1; }
     imgfile="$dir/$name.img"
     [[ -f "$imgfile" ]] && { pause "Already exists: $imgfile"; return 1; }
     truncate -s "${size_gb}G" "$imgfile" 2>/dev/null || { pause "Failed to allocate image file."; return 1; }
@@ -1448,14 +1331,7 @@ _setup_image() {
         local clean; clean=$(printf '%s' "$choice" | _strip_ansi | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
         case "$clean" in
             *"${L[img_select]}"*) local picked; picked=$(_pick_img) && { _mount_img "$picked" && return 0; } ;;
-            *"${L[img_create]}"*)
-                finput "$(printf "Image name (e.g. simpleDocker):\n\n  ${RED}⚠  WARNING:${NC}  The name cannot be changed after creation.")" || continue
-                local _ci_name="${FINPUT_RESULT//[^a-zA-Z0-9_\-]/}"
-                [[ -z "$_ci_name" ]] && { pause "No name given."; continue; }
-                finput "Max size in GB (sparse — only uses actual disk space, leave blank for 50 GB):" || continue
-                local _ci_size="${FINPUT_RESULT:-50}"
-                local _ci_dir; _ci_dir=$(_pick_dir) || { pause "No directory selected."; continue; }
-                _create_img "$_ci_name" "$_ci_size" "$_ci_dir" && return 0 ;;
+            *"${L[img_create]}"*) _create_img && return 0 ;;
             *)
                 for _di in "${detected_imgs[@]}"; do
                     if [[ "$clean" == *"$(basename "$_di")"* ]]; then
@@ -1497,12 +1373,7 @@ _ensure_ubuntu() {
     mkdir -p "$UBUNTU_DIR" 2>/dev/null
 
     local ubuntu_script; ubuntu_script=$(mktemp "$TMP_DIR/.sd_ubuntu_dl_XXXXXX.sh")
-    local _sd_chroot_fn='_chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
-}'
+    local _sd_chroot_fn='_chroot_bash() { local r=$1; shift; local b=/bin/bash; [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }'
     cat > "$ubuntu_script" <<UBUNTUSCRIPT
 $_sd_chroot_fn
 trap '' INT
@@ -1654,7 +1525,6 @@ _menu() {
 }
 
 _resize_image() {
-    # arg $1=new_size_gb (required — caller prompts)
     [[ -z "$IMG_PATH" || ! -f "$IMG_PATH" ]] && { pause "No image mounted."; return 1; }
     local cur_bytes; cur_bytes=$(stat -c%s "$IMG_PATH" 2>/dev/null)
     local cur_gib;   cur_gib=$(awk "BEGIN{printf \"%.1f\",$cur_bytes/1073741824}")
@@ -1667,7 +1537,9 @@ _resize_image() {
     fi
     local used_gib; used_gib=$(awk "BEGIN{printf \"%.1f\",$used_bytes/1073741824}")
     local min_gib;  min_gib=$(awk "BEGIN{print int($used_bytes/1073741824)+1+10}")
-    local new_gib_raw="${1//[^0-9]/}"
+    local new_gib_raw
+    finput "$(printf 'Current: %s GB   Used: %s GB   Minimum: %s GB\n\nNew size in GB:' "$cur_gib" "$used_gib" "$min_gib")" || return 0
+    new_gib_raw="${FINPUT_RESULT//[^0-9]/}"
     if [[ -z "$new_gib_raw" || "$new_gib_raw" -lt "$min_gib" ]]; then
         pause "$(printf 'Invalid size. Must be a whole number ≥ %s GB.' "$min_gib")"; return 1
     fi
@@ -2336,62 +2208,20 @@ _sd_extract_auto() {
     local _tmp; _tmp=$(mktemp "$dest/.sd_dl_XXXXXX")
     curl -fL --progress-bar --retry 5 --retry-delay 3 --retry-all-errors -C - "$url" -o "$_tmp" || { rm -f "$_tmp"; printf "[!] Download failed: %s\n" "$url"; return 1; }
     local strip=1
-    local _extracted=false
     if [[ "$url" =~ \.tar\.zst$ ]]; then
         local _tops; _tops=$(tar --use-compress-program=unzstd -t -f "$_tmp" 2>/dev/null | sed 's|/.*||' | sort -u | grep -v '^\.$' | wc -l) || true
         [[ "${_tops:-1}" -gt 1 ]] && strip=0
-        tar --use-compress-program=unzstd -x -C "$dest" --strip-components="$strip" -f "$_tmp" 2>/dev/null && _extracted=true || true
-        if [[ "$_extracted" == false ]]; then
-            python3 -c "
-import tarfile, os, sys
-tmp,dest,strip=sys.argv[1],sys.argv[2],int(sys.argv[3])
-with tarfile.open(tmp,'r:*') as t:
-    members=t.getmembers()
-    for m in members:
-        parts=m.name.split('/')
-        if strip and len(parts)>strip: m.name='/'.join(parts[strip:])
-        elif strip: continue
-        if m.name: t.extract(m,dest,set_attrs=False)
-" "$_tmp" "$dest" "$strip" 2>/dev/null && _extracted=true || true
-        fi
+        tar --use-compress-program=unzstd -x -C "$dest" --strip-components="$strip" -f "$_tmp"
     elif [[ "$url" =~ \.tar\.(gz|bz2|xz)$|\.tgz$ ]]; then
         local _tops; _tops=$(tar -ta -f "$_tmp" 2>/dev/null | sed 's|/.*||' | sort -u | grep -v '^\.$' | wc -l) || true
         [[ "${_tops:-1}" -gt 1 ]] && strip=0
-        tar -xa -C "$dest" --strip-components="$strip" -f "$_tmp" 2>/dev/null && _extracted=true || true
-        if [[ "$_extracted" == false ]]; then
-            python3 -c "
-import tarfile, os, sys
-tmp,dest,strip=sys.argv[1],sys.argv[2],int(sys.argv[3])
-with tarfile.open(tmp,'r:*') as t:
-    members=t.getmembers()
-    for m in members:
-        parts=m.name.split('/')
-        if strip and len(parts)>strip: m.name='/'.join(parts[strip:])
-        elif strip: continue
-        if m.name: t.extract(m,dest,set_attrs=False)
-" "$_tmp" "$dest" "$strip" 2>/dev/null && _extracted=true || true
-        fi
-    elif [[ "$url" =~ \.zip$ ]]; then
-        unzip -o -d "$dest" "$_tmp" 2>/dev/null && _extracted=true || true
-        if [[ "$_extracted" == false ]]; then
-            python3 -c "
-import zipfile, sys
-with zipfile.ZipFile(sys.argv[1]) as z: z.extractall(sys.argv[2])
-" "$_tmp" "$dest" 2>/dev/null && _extracted=true || true
-        fi
-    fi
-    if [[ "$_extracted" == false ]]; then
-        # archive extraction failed or URL is a plain binary — place in dest
-        local _bn; _bn=$(basename "$url" | sed 's/[?#].*//' \
-            | sed 's/\.\(tar\.\(gz\|bz2\|xz\|zst\)\|tgz\|zip\)$//' \
-            | sed 's/[-_]linux[-_][^-]*$//' \
-            | sed 's/[-_]linux$//' \
-            | sed 's/[-_]\(amd64\|arm64\|x86_64\|aarch64\|v[0-9][0-9.]*\)$//')
+        tar -xa -C "$dest" --strip-components="$strip" -f "$_tmp"
+    elif [[ "$url" =~ \.zip$ ]]; then unzip -o -d "$dest" "$_tmp" 2>/dev/null
+    else
+        local _bn; _bn=$(basename "$url" | sed 's/[?#].*//' | sed 's/[-_]linux[-_][^.]*$//' | sed 's/[-_]\(amd64\|arm64\|x86_64\|aarch64\)$//')
         [[ -z "$_bn" ]] && _bn=$(basename "$url" | sed 's/[?#].*//')
-        # If dest already ends in bin, place directly. Otherwise, mkdir -p dest.
-        mkdir -p "$dest"
-        mv "$_tmp" "$dest/$_bn"; chmod +x "$dest/$_bn"; return
-    fi
+        mkdir -p "$dest/bin"
+        mv "$_tmp" "$dest/bin/$_bn"; chmod +x "$dest/bin/$_bn"; return; fi
     rm -f "$_tmp"
 }
 _sd_latest_tag() {
@@ -2495,25 +2325,27 @@ GHBLOCK
     if [[ -n "$script" ]]; then
         local _base; _base=$(jq -r '.meta.base // "ubuntu"' "$sj" 2>/dev/null)
         printf '# ── %s script ──\n' "$label"
+        local _ub_q3; _ub_q3=$(printf '%q' "$UBUNTU_DIR")
         local _ip_q3; _ip_q3=$(printf '%q' "$install_path")
         local _sudoers_q; _sudoers_q=$(printf '%q' "/etc/sudoers.d/simpledocker_script_$$")
         printf 'printf '\''%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/bash, /usr/bin/chroot, /usr/sbin/chroot, /usr/bin/unshare\\n'\'' | sudo -n tee %q >/dev/null 2>&1 || true\n' "$_me" "$_sudoers_q"
-        printf 'mkdir -p %s/tmp %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ip_q3" "$_ip_q3" "$_ip_q3" "$_ip_q3"
-        printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ip_q3"
-        printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ip_q3"
-        printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ip_q3"
-        
-        printf '_sd_run_cmd=$(mktemp %s/tmp/.sd_run_XXXXXX.sh 2>/dev/null || echo %s/tmp/.sd_run_fallback.sh)\n' "$_ip_q3" "$_ip_q3"
+        printf 'mkdir -p %s/tmp %s/mnt %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ub_q3" "$_ub_q3" "$_ub_q3" "$_ub_q3" "$_ub_q3"
+        printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ub_q3"
+        printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ub_q3"
+        printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ub_q3"
+        printf 'sudo -n mount --bind %s %s/mnt 2>/dev/null || true\n' "$_ip_q3" "$_ub_q3"
+        printf '_sd_run_cmd=$(mktemp %s/../.sd_run_XXXXXX.sh 2>/dev/null || echo /tmp/.sd_run_%s.sh)\n' "$_ub_q3" "$$"
         printf 'cat > "$_sd_run_cmd" << '"'"'_SD_RUN_EOF'"'"'\n'
-        printf '#!/bin/bash\nset -e\ncd /\n'
+        printf '#!/bin/bash\nset -e\ncd /mnt\n'
         printf '%s\n' "$script"
         printf '_SD_RUN_EOF\n'
         printf 'chmod +x "$_sd_run_cmd"\n'
-        
-        printf '_chroot_bash %s /tmp/$(basename "$_sd_run_cmd")\n' "$_ip_q3"
+        printf 'sudo -n mount --bind "$_sd_run_cmd" %s/tmp/.sd_run.sh 2>/dev/null || cp "$_sd_run_cmd" %s/tmp/.sd_run.sh 2>/dev/null || true\n' "$_ub_q3" "$_ub_q3"
+        printf '_chroot_bash %s /tmp/.sd_run.sh\n' "$_ub_q3"
         printf '_sd_run_rc=$?\n'
-        printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q3" "$_ip_q3" "$_ip_q3"
-        printf 'rm -f "$_sd_run_cmd" 2>/dev/null || true\n'
+        printf 'sudo -n umount -lf %s/tmp/.sd_run.sh 2>/dev/null || true\n' "$_ub_q3"
+        printf 'sudo -n umount -lf %s/mnt %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ub_q3" "$_ub_q3" "$_ub_q3" "$_ub_q3"
+        printf 'rm -f "$_sd_run_cmd" %s/tmp/.sd_run.sh 2>/dev/null || true\n' "$_ub_q3"
         printf 'sudo -n rm -f %q 2>/dev/null || true\n' "$_sudoers_q"
         printf 'if [[ $_sd_run_rc -ne 0 ]]; then exit "$_sd_run_rc"; fi\n'
     fi
@@ -2708,16 +2540,13 @@ _deps_parse_split() {
 }
 
 _run_job() {
-    # args: $1=mode(install|update) $2=cid $3=force(yes|ask, default ask)
-    local mode="$1" cid="$2" _force="${3:-ask}"
+    local mode="$1" cid="$2"
     local install_path; install_path=$(_cpath "$cid")
     local ok_file="$CONTAINERS_DIR/$cid/.install_ok"
     local fail_file="$CONTAINERS_DIR/$cid/.install_fail"
 
     if [[ "$mode" == "install" ]] && _is_installing "$cid"; then
-        if [[ "$_force" != "yes" ]]; then
-            return 1   # caller decides whether to confirm and retry with force=yes
-        fi
+        confirm "$(printf '⚠  %s is already installing.\n\n  Running it again will restart from scratch.\n  Continue?' "$(_cname "$cid")")" || return 1
         tmux kill-session -t "$(_inst_sess "$cid")" 2>/dev/null || true
     fi
 
@@ -2759,8 +2588,8 @@ _run_job() {
     local env_block; env_block=$(_env_exports "$cid" "$install_path")
 
     {
-        printf '#!/usr/bin/env bash\nset -e\n'
-        printf 'python3 -c "import os; os.makedirs(os.path.expanduser(%q), exist_ok=True)" 2>/dev/null || true\n' "$LOGS_DIR"
+        printf '#!/usr/bin/env bash\n'
+        printf 'mkdir -p %q 2>/dev/null || true\n' "$_logdir"
         printf 'exec > >(tee -a %q) 2>&1\n' "$_logfile"
         printf '_sd_icap() { local _z; _z=$(stat -c%%s %q 2>/dev/null||echo 0); [[ $_z -gt 10485760 ]] && { tail -c 8388608 %q > %q.t 2>/dev/null && mv %q.t %q 2>/dev/null||true; }; }\ntrap _sd_icap EXIT\n' "$_logfile" "$_logfile" "$_logfile" "$_logfile" "$_logfile"
         printf '_finish() {\n'
@@ -2778,27 +2607,9 @@ _run_job() {
 
         printf '%s\n' "$env_block"
         printf 'cd "$CONTAINER_ROOT"\n\n'
-        printf '_chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
-}\n'
+        printf '_chroot_bash() { local r=$1; shift; local b=/bin/bash; [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }\n'
 
         _emit_ubuntu_bootstrap_inline
-
-        # Ensure container has the base if it was missed during initial creation (e.g. Ubuntu base was just downloaded)
-        printf 'if [[ ! -e bin/bash && -f %q/.ubuntu_ready ]]; then\n' "$UBUNTU_DIR"
-        printf '    printf '"'"'[sd] Populating container with Ubuntu base...\\n'"'"'\n'
-        printf '    # Need sudo here because base files are owned by root\n'
-        printf '    if command -v rsync >/dev/null 2>&1; then\n'
-        printf '        sudo -n rsync -a --ignore-existing %q/ . 2>/dev/null || true\n' "$UBUNTU_DIR"
-        printf '    else\n'
-        printf '        sudo -n cp -an %q/. . 2>/dev/null || true\n' "$UBUNTU_DIR"
-        printf '    fi\n'
-        printf '    sudo -n chown -R %q . 2>/dev/null || true\n' "$(id -u):$(id -g)"
-        printf 'fi\n\n'
-
 
         if [[ "$mode" == "install" ]]; then
             local _deps_raw; _deps_raw=$(jq -r '.deps // empty' "$CONTAINERS_DIR/$cid/service.json" 2>/dev/null)
@@ -2813,18 +2624,20 @@ _run_job() {
                     printf 'printf '\''\033[1m[deps] Installing: %s\033[0m\n'\'' %q\n' "$SD_APK_PKGS"
                     local _me; _me=$(id -un)
                     local _sudoers_q; _sudoers_q=$(printf '%q' "/etc/sudoers.d/simpledocker_deps_$$")
-                    local _ip_q2; _ip_q2=$(printf '%q' "$install_path")
+                    local _ub_q2; _ub_q2=$(printf '%q' "$UBUNTU_DIR")
                     printf 'printf '\''%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/chroot, /usr/sbin/chroot, /usr/bin/unshare\n'\'' | sudo -n tee %q >/dev/null 2>&1 || true\n' "$_me" "$_sudoers_q"
-                    printf 'mkdir -p %s/tmp %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ip_q2" "$_ip_q2" "$_ip_q2" "$_ip_q2"
-                    printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ip_q2"
-                    printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ip_q2"
-                    printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ip_q2"
-                    printf '_sd_deps_cmd=$(mktemp %s/tmp/.sd_deps_XXXXXX.sh 2>/dev/null || echo %s/tmp/.sd_deps_%s.sh)\n' "$_ip_q2" "$_ip_q2" "$$"
+                    printf 'mkdir -p %s/tmp %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ub_q2" "$_ub_q2" "$_ub_q2" "$_ub_q2"
+                    printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ub_q2"
+                    printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ub_q2"
+                    printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ub_q2"
+                    printf '_sd_deps_cmd=$(mktemp %s/../.sd_deps_XXXXXX.sh 2>/dev/null || echo /tmp/.sd_deps_%s.sh)\n' "$_ub_q2" "$$"
                     printf 'printf '"'"'#!/bin/sh\nset -e\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s 2>&1 || { apt-get update -qq 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s 2>&1; }\n'"'"' > "$_sd_deps_cmd"\n' "$SD_APK_PKGS" "$SD_APK_PKGS"
                     printf 'chmod +x "$_sd_deps_cmd"\n'
-                    printf '_chroot_bash %s /tmp/$(basename "$_sd_deps_cmd")\n' "$_ip_q2"
-                    printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q2" "$_ip_q2" "$_ip_q2"
-                    printf 'rm -f "$_sd_deps_cmd" 2>/dev/null || true\n'
+                    printf 'sudo -n mount --bind "$_sd_deps_cmd" %s/tmp/.sd_deps_run.sh 2>/dev/null || cp "$_sd_deps_cmd" %s/tmp/.sd_deps_run.sh 2>/dev/null || true\n' "$_ub_q2" "$_ub_q2"
+                    printf '_chroot_bash %s /tmp/.sd_deps_run.sh\n' "$_ub_q2"
+                    printf 'sudo -n umount -lf %s/tmp/.sd_deps_run.sh 2>/dev/null || true\n' "$_ub_q2"
+                    printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ub_q2" "$_ub_q2" "$_ub_q2"
+                    printf 'rm -f "$_sd_deps_cmd" %s/tmp/.sd_deps_run.sh 2>/dev/null || true\n' "$_ub_q2"
                     printf 'sudo -n rm -f %q 2>/dev/null || true\n\n' "$_sudoers_q"
                 fi
             fi
@@ -2832,27 +2645,10 @@ _run_job() {
             if [[ -n "$_dirs" ]]; then
                 printf '# ── Create dirs ──\n'
                 printf 'printf '"'"'\033[1m[dirs] Creating directory structure\033[0m\n'"'"'\n'
-                # Expand lib(a,b) -> lib/a lib/b
-                local _expanded_dirs; _expanded_dirs=$(printf '%s' "$_dirs" | python3 -c '
-import sys, re
-def expand(s):
-    res = []
-    # Match pattern: base(sub1, sub2, ...)
-    for part in [p.strip() for p in s.split(",")]:
-        m = re.match(r"^([^(]+)\(([^)]+)\)$", part)
-        if m:
-            base, subs = m.groups()
-            for sub in [s.strip() for s in subs.split(",")]:
-                res.append(f"{base.strip()}/{sub}")
-        else:
-            res.append(part)
-    return res
-print("\n".join(expand(sys.stdin.read())))
-' 2>/dev/null || printf '%s' "$_dirs" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+                local flat_dirs; flat_dirs=$(printf '%s' "$_dirs" | tr ',' '\n' | sed 's/([^)]*)//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')
                 while IFS= read -r d; do
-                    [[ -z "$d" ]] && continue
                     printf 'mkdir -p %q 2>/dev/null || true\n' "$install_path/$d"
-                done <<< "$_expanded_dirs"
+                done <<< "$flat_dirs"
                 printf '\n'
             fi
 
@@ -2863,15 +2659,17 @@ print("\n".join(expand(sys.stdin.read())))
                 printf 'printf '"'"'\033[1m[pip] Installing: %s\033[0m\n'"'"' %q\n' "$_pip_pkgs"
                 local _me2; _me2=$(id -un)
                 local _sudoers2_q; _sudoers2_q=$(printf '%q' "/etc/sudoers.d/simpledocker_pip_$$")
+                local _ub_q; _ub_q=$(printf '%q' "$UBUNTU_DIR")
                 local _ip_q; _ip_q=$(printf '%q' "$install_path")
                 local _venv_q; _venv_q=$(printf '%q' "$install_path/venv")
                 printf 'printf '"'"'\033[2m[pip] Using Ubuntu base (glibc)\033[0m\n'"'"'\n'
                 printf 'printf '"'"'%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/bash, /usr/bin/chroot, /usr/sbin/chroot, /usr/bin/unshare\n'"'"' | sudo -n tee %q >/dev/null 2>&1 || true\n' "$_me2" "$_sudoers2_q"
-                printf 'mkdir -p %s/tmp %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ip_q" "$_ip_q" "$_ip_q" "$_ip_q"
-                printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ip_q"
-                printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ip_q"
-                printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ip_q"
-                printf '_sd_pip_cmd=%s\n' "$(printf '%q' "$(mktemp "$install_path/tmp/.sd_pip_XXXXXX.sh" 2>/dev/null || echo "$install_path/tmp/.sd_pip_$$.sh")")"
+                printf 'mkdir -p %s/tmp %s/mnt %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ub_q" "$_ub_q" "$_ub_q" "$_ub_q" "$_ub_q"
+                printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ub_q"
+                printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ub_q"
+                printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ub_q"
+                printf 'sudo -n mount --bind %s %s/mnt 2>/dev/null || true\n' "$_ip_q" "$_ub_q"
+                printf '_sd_pip_cmd=%s\n' "$(printf '%q' "$(mktemp "$TMP_DIR/.sd_pip_XXXXXX.sh" 2>/dev/null || echo "/tmp/.sd_pip_$$.sh")")"
                 printf 'cat > "$_sd_pip_cmd" << '"'"'_SD_PIP_EOF'"'"'\n'
                 printf '#!/bin/sh\n'
                 printf 'set -e\n'
@@ -2880,15 +2678,17 @@ print("\n".join(expand(sys.stdin.read())))
                 printf '    apt-get update -qq 2>&1\n'
                 printf '    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s python3-full python3-pip 2>&1\n' "$_py_tok"
                 printf '}\n'
-                printf 'python3 -m venv --clear /venv\n'
-                printf '/venv/bin/pip install --upgrade pip\n'
-                printf '/venv/bin/pip install --upgrade %s\n' "$_pip_pkgs"
+                printf 'python3 -m venv --clear /mnt/venv\n'
+                printf '/mnt/venv/bin/pip install --upgrade pip\n'
+                printf '/mnt/venv/bin/pip install --upgrade %s\n' "$_pip_pkgs"
                 printf '_SD_PIP_EOF\n'
                 printf 'chmod +x "$_sd_pip_cmd"\n'
-                printf '_chroot_bash %s /tmp/$(basename "$_sd_pip_cmd")\n' "$_ip_q"
+                printf 'sudo -n mount --bind "$_sd_pip_cmd" %s/tmp/.sd_pip_run.sh 2>/dev/null || cp "$_sd_pip_cmd" %s/tmp/.sd_pip_run.sh 2>/dev/null || true\n' "$_ub_q" "$_ub_q"
+                printf '_chroot_bash %s /tmp/.sd_pip_run.sh\n' "$_ub_q"
                 printf '_sd_pip_rc=$?\n'
-                printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q" "$_ip_q" "$_ip_q"
-                printf 'rm -f "$_sd_pip_cmd" 2>/dev/null || true\n'
+                printf 'sudo -n umount -lf %s/tmp/.sd_pip_run.sh 2>/dev/null || true\n' "$_ub_q"
+                printf 'sudo -n umount -lf %s/mnt %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ub_q" "$_ub_q" "$_ub_q" "$_ub_q"
+                printf 'rm -f "$_sd_pip_cmd" %s/tmp/.sd_pip_run.sh 2>/dev/null || true\n' "$_ub_q"
                 printf 'sudo -n rm -f %q 2>/dev/null || true\n' "$_sudoers2_q"
                 printf 'sudo -n chown -R %q %s 2>/dev/null || true\n' "${_me2}:" "$_venv_q"
                 printf 'if [[ $_sd_pip_rc -ne 0 ]]; then exit "$_sd_pip_rc"; fi\n\n'
@@ -2900,13 +2700,15 @@ print("\n".join(expand(sys.stdin.read())))
                 printf 'printf '"'"'\033[1m[npm] Installing: %s\033[0m\n'"'"' %q\n' "$_npm_pkgs"
                 local _me3; _me3=$(id -un)
                 local _sudoers3_q; _sudoers3_q=$(printf '%q' "/etc/sudoers.d/simpledocker_npm_$$")
+                local _ub_qn; _ub_qn=$(printf '%q' "$UBUNTU_DIR")
                 local _ip_qn; _ip_qn=$(printf '%q' "$install_path")
                 printf 'printf '"'"'%s ALL=(ALL) NOPASSWD: /bin/mount, /bin/umount, /usr/bin/bash, /usr/bin/chroot, /usr/sbin/chroot, /usr/bin/unshare\n'"'"' | sudo -n tee %q >/dev/null 2>&1 || true\n' "$_me3" "$_sudoers3_q"
-                printf 'mkdir -p %s/tmp %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ip_qn" "$_ip_qn" "$_ip_qn" "$_ip_qn"
-                printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ip_qn"
-                printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ip_qn"
-                printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ip_qn"
-                printf '_sd_npm_cmd=%s\n' "$(printf '%q' "$(mktemp "$install_path/tmp/.sd_npm_XXXXXX.sh" 2>/dev/null || echo "$install_path/tmp/.sd_npm_$$.sh")")"
+                printf 'mkdir -p %s/tmp %s/mnt %s/proc %s/sys %s/dev 2>/dev/null || true\n' "$_ub_qn" "$_ub_qn" "$_ub_qn" "$_ub_qn" "$_ub_qn"
+                printf 'sudo -n mount --bind /proc %s/proc 2>/dev/null || true\n' "$_ub_qn"
+                printf 'sudo -n mount --bind /sys  %s/sys  2>/dev/null || true\n' "$_ub_qn"
+                printf 'sudo -n mount --bind /dev  %s/dev  2>/dev/null || true\n' "$_ub_qn"
+                printf 'sudo -n mount --bind %s %s/mnt 2>/dev/null || true\n' "$_ip_qn" "$_ub_qn"
+                printf '_sd_npm_cmd=%s\n' "$(printf '%q' "$(mktemp "$TMP_DIR/.sd_npm_XXXXXX.sh" 2>/dev/null || echo "/tmp/.sd_npm_$$.sh")")"
                 printf 'cat > "$_sd_npm_cmd" << '"'"'_SD_NPM_EOF'"'"'\n'
                 printf '#!/bin/sh\n'
                 printf 'set -e\n'
@@ -2921,13 +2723,15 @@ print("\n".join(expand(sys.stdin.read())))
                 printf '    curl -fsSL https://deb.nodesource.com/setup_22.x | bash - 2>&1\n'
                 printf '    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends nodejs 2>&1\n'
                 printf 'fi\n'
-                printf 'npm install %s 2>&1\n' "$_npm_pkgs"
+                printf 'cd /mnt && npm install %s 2>&1\n' "$_npm_pkgs"
                 printf '_SD_NPM_EOF\n'
                 printf 'chmod +x "$_sd_npm_cmd"\n'
-                printf '_chroot_bash %s /tmp/$(basename "$_sd_npm_cmd")\n' "$_ip_qn"
+                printf 'sudo -n mount --bind "$_sd_npm_cmd" %s/tmp/.sd_npm_run.sh 2>/dev/null || cp "$_sd_npm_cmd" %s/tmp/.sd_npm_run.sh 2>/dev/null || true\n' "$_ub_qn" "$_ub_qn"
+                printf '_chroot_bash %s /tmp/.sd_npm_run.sh\n' "$_ub_qn"
                 printf '_sd_npm_rc=$?\n'
-                printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_qn" "$_ip_qn" "$_ip_qn"
-                printf 'rm -f "$_sd_npm_cmd" 2>/dev/null || true\n'
+                printf 'sudo -n umount -lf %s/tmp/.sd_npm_run.sh 2>/dev/null || true\n' "$_ub_qn"
+                printf 'sudo -n umount -lf %s/mnt %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ub_qn" "$_ub_qn" "$_ub_qn" "$_ub_qn"
+                printf 'rm -f "$_sd_npm_cmd" %s/tmp/.sd_npm_run.sh 2>/dev/null || true\n' "$_ub_qn"
                 printf 'sudo -n rm -f %q 2>/dev/null || true\n' "$_sudoers3_q"
                 printf 'sudo -n chown -R %q %s/node_modules 2>/dev/null || true\n' "${_me3}:" "$_ip_qn"
                 printf 'if [[ $_sd_npm_rc -ne 0 ]]; then exit "$_sd_npm_rc"; fi\n\n'
@@ -2987,12 +2791,10 @@ _build_start_script() {
     {
         printf '#!/usr/bin/env bash\n# Auto-generated by simpleDocker\n\n'
         local _slog; _slog=$(_log_path "$cid" "start")
-        printf 'python3 -c "import os; os.makedirs(os.path.expanduser(%q), exist_ok=True)" 2>/dev/null || true\n' "$LOGS_DIR"
-
+        printf 'mkdir -p %q 2>/dev/null || true\n' "$LOGS_DIR"
         printf 'exec > >(tee -a %q) 2>&1\n' "$_slog"
         printf '_sd_scap() { local _z; _z=$(stat -c%%s %q 2>/dev/null||echo 0); [[ $_z -gt 10485760 ]] && { tail -c 8388608 %q > %q.t 2>/dev/null && mv %q.t %q 2>/dev/null||true; }; }\ntrap _sd_scap EXIT\n\n' "$_slog" "$_slog" "$_slog" "$_slog" "$_slog"
-            local env_str="export CONTAINER_ROOT=/ HOME=/ VIRTUAL_ENV=/venv PYTHONNOUSERSITE=1 PIP_USER=false"
-            env_str+=" PATH=\"/venv/bin:/python/bin:/.local/bin:/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\""
+            local env_str="export CONTAINER_ROOT=/mnt HOME=/mnt"
             local keys; mapfile -t keys < <(jq -r '.environment // {} | keys[]' "$sj" 2>/dev/null)
             for k in "${keys[@]}"; do
                 local v; v=$(jq -r --arg k "$k" '.environment[$k] | tostring' "$sj" 2>/dev/null)
@@ -3011,18 +2813,14 @@ _build_start_script() {
                         printf '%s' "$v" > "$_secret_file" 2>/dev/null || true
                     fi
                 fi
-                if [[ "$v" != /* && "$v" != '$'* && "$v" != *'://'* && -n "$v" && "$v" =~ / ]]; then v="/$v"; fi
-                if [[ "$k" == "LD_LIBRARY_PATH" || "$k" == "LIBRARY_PATH" || "$k" == "PKG_CONFIG_PATH" ]]; then
-                    env_str+=" $k=\"$v:\${$k:-}\""
-                else
-                    env_str+=" $k=\"$v\""
-                fi
+                if [[ "$v" != /* && "$v" != '$'* && "$v" != *'://'* && -n "$v" && "$v" =~ / ]]; then v="/mnt/$v"; fi
+                env_str+=" $k=\"$v\""
             done
-            local chroot_cmd; chroot_cmd=$(printf '%s' "${start_cmd:-printf 'No start defined\\nsleep 10'}" | sed 's|\$CONTAINER_ROOT|/|g')
+            local chroot_cmd; chroot_cmd=$(printf '%s' "${start_cmd:-printf 'No start defined\\nsleep 10'}" | sed 's|\$CONTAINER_ROOT|/mnt|g')
             local _gpu_mode; _gpu_mode=$(jq -r '.meta.gpu // empty' "$sj" 2>/dev/null)
 
             if [[ "$_gpu_mode" == "cuda_auto" ]]; then
-                local _nv_chroot_lib; _nv_chroot_lib="$install_path/usr/local/lib/sd_nvidia"
+                local _nv_chroot_lib; _nv_chroot_lib="$UBUNTU_DIR/usr/local/lib/sd_nvidia"
                 printf '# NVIDIA: copy host driver .so files into chroot (exact version match)\n'
                 printf '_SD_NV_MAJ=""\n'
                 printf 'if [[ -f /sys/module/nvidia/version ]]; then\n'
@@ -3048,7 +2846,7 @@ _build_start_script() {
                 printf '  mkdir -p "$_SD_NV_DIR"\n'
                 printf '  _SD_NV_COUNT=0\n'
                 printf '  for _sd_f in /usr/lib/libcuda.so* /usr/lib/libnvidia*.so* /usr/lib64/libcuda.so* /usr/lib64/libnvidia*.so* /usr/lib/x86_64-linux-gnu/libcuda.so* /usr/lib/x86_64-linux-gnu/libnvidia*.so* /usr/lib/aarch64-linux-gnu/libcuda.so* /usr/lib/aarch64-linux-gnu/libnvidia*.so*; do\n'
-                printf '    [[ -e "$_sd_f" ]] && cp -Lf "$_sd_f" "$_SD_NV_DIR/" 2>/dev/null && (( _SD_NV_COUNT++ )) || true\n'
+                printf '    [[ -e "$_sd_f" ]] && cp -Pf "$_sd_f" "$_SD_NV_DIR/" 2>/dev/null && (( _SD_NV_COUNT++ )) || true\n'
                 printf '  done\n'
                 printf '  if [[ "$_SD_NV_COUNT" -eq 0 ]]; then\n'
                 printf '    printf "[sd] WARNING: no NVIDIA .so files found on host -- CPU mode\n"\n'
@@ -3063,34 +2861,29 @@ _build_start_script() {
             local _nv_ld=""
             [[ "$_gpu_mode" == "cuda_auto" ]] && _nv_ld=" LD_LIBRARY_PATH=\"/usr/local/lib/sd_nvidia:\${LD_LIBRARY_PATH:-}\""
             local _chroot_inner_cmd
-            _chroot_inner_cmd=$(printf '%q' "cd / && $env_str$_nv_ld && $chroot_cmd")
+            _chroot_inner_cmd=$(printf '%q' "cd /mnt && $env_str$_nv_ld && $chroot_cmd")
             local _ct_hostname; _ct_hostname=$(printf '%s' "$(_cname "$cid")" \
                 | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9-' '-' | cut -c1-63)
 
             local _nswrap_body=""
-            _nswrap_body+='_chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
-}'$'\n'
+            _nswrap_body+='_chroot_bash() { local r=$1; shift; local b=/bin/bash; [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }'$'\n'
             _nswrap_body+="# Runs inside: sudo nsenter -- unshare --mount --pid --uts --ipc [--user] --fork"$'\n'
             _nswrap_body+="_NS_EXTRA=\"\${1:-}\""$'\n\n'
             _nswrap_body+="# UTS: set container hostname"$'\n'
             _nswrap_body+="$(printf 'printf "%%s" %q > /proc/sys/kernel/hostname 2>/dev/null || true' "$_ct_hostname")"$'\n\n'
             _nswrap_body+="# Mount: proc must be fresh mount -t proc (not bind) when inside PID namespace"$'\n'
-            _nswrap_body+="$(printf 'mkdir -p %q %q %q 2>/dev/null || true' "$install_path/proc" "$install_path/sys" "$install_path/dev")"$'\n'
-            _nswrap_body+="$(printf 'mount -t proc proc %q' "$install_path/proc")"$'\n'
-            _nswrap_body+="$(printf 'mount --bind /sys  %q' "$install_path/sys")"$'\n'
-            _nswrap_body+="$(printf 'mount --bind /dev  %q' "$install_path/dev")"$'\n'
+            _nswrap_body+="$(printf 'mount -t proc proc %q' "$UBUNTU_DIR/proc")"$'\n'
+            _nswrap_body+="$(printf 'mount --bind /sys  %q' "$UBUNTU_DIR/sys")"$'\n'
+            _nswrap_body+="$(printf 'mount --bind /dev  %q' "$UBUNTU_DIR/dev")"$'\n'
+            _nswrap_body+="$(printf 'mount --bind %q %q' "$install_path" "$UBUNTU_DIR/mnt")"$'\n'
             if [[ -n "$MNT_DIR" ]]; then
-                _nswrap_body+="$(printf 'mkdir -p %q 2>/dev/null || true' "$install_path$MNT_DIR")"$'\n'
-                _nswrap_body+="$(printf 'mount --bind %q %q' "$MNT_DIR" "$install_path$MNT_DIR") \\"$'\n'
+                _nswrap_body+="$(printf 'mkdir -p %q 2>/dev/null || true' "$UBUNTU_DIR$MNT_DIR")"$'\n'
+                _nswrap_body+="$(printf 'mount --bind %q %q' "$MNT_DIR" "$UBUNTU_DIR$MNT_DIR") \\"$'\n'
                 _nswrap_body+='  || printf "[sd] WARNING: MNT_DIR bind mount failed -- storage symlinks may not resolve\n"'$'\n'
             fi
             local _nhf; _nhf=$(_netns_hosts "$MNT_DIR")
-            _nswrap_body+="$(printf 'if [[ -f %q ]]; then mount --bind %q %q 2>/dev/null || true; fi' "$_nhf" "$_nhf" "$install_path/etc/hosts")"$'\n\n'
-            local _exec_inner; _exec_inner=$(printf '_chroot_bash %q -c %s' "$install_path" "$_chroot_inner_cmd")
+            _nswrap_body+="$(printf 'if [[ -f %q ]]; then mount --bind %q %q 2>/dev/null || true; fi' "$_nhf" "$_nhf" "$UBUNTU_DIR/etc/hosts")"$'\n\n'
+            local _exec_inner; _exec_inner=$(printf '_chroot_bash %q -c %s' "$UBUNTU_DIR" "$_chroot_inner_cmd")
             _nswrap_body+="${_exec_inner}"$'\n'
 
             local _unshare_flags="--mount --pid --uts --ipc"
@@ -3232,11 +3025,8 @@ _update_size_cache() {
 }
 
 _start_container() {
-    # args: $1=cid $2=attach("attach"|"background", default "background") $3=scid(storage profile, optional)
-    local cid="$1"
-    local _attach="${2:-background}"
-    local _scid_arg="${3:-}"
-    [[ "$_attach" == "--auto" ]] && _attach="background"   # legacy compat
+    local cid="$1" _auto=false
+    [[ "${2:-}" == "--auto" ]] && _auto=true
     local install_path; install_path=$(_cpath "$cid")
     local sess; sess="$(tsess "$cid")"
     _guard_space || return 1
@@ -3249,12 +3039,10 @@ _start_container() {
         fi
         _stor_unlink "$cid" "$install_path"
         local scid
-        if [[ -n "$_scid_arg" ]]; then
-            scid="$_scid_arg"
-        elif [[ "$_attach" == "background" && -z "$_scid_arg" ]]; then
+        if [[ "$_auto" == "true" ]]; then
             scid=$(_auto_pick_storage_profile "$cid")
         else
-            scid=$(_auto_pick_storage_profile "$cid")
+            scid=$(_pick_storage_profile "$cid")
         fi
         [[ -z "$scid" ]] && return 1
         _stor_link "$cid" "$install_path" "$scid"
@@ -3299,8 +3087,20 @@ _start_container() {
     _cron_start_all "$cid"
     { sleep 2; _cap_drop_apply "$cid"; _seccomp_apply "$cid"; } &>/dev/null &
     disown $! 2>/dev/null || true
+    if [[ "$_auto" == "true" ]]; then
+        sleep 0.5
+        return 0
+    fi
     sleep 0.5
-    if [[ "$_attach" == "attach" ]]; then
+    local _fzf_out _fzf_pid _frc
+    _fzf_out=$(mktemp "$TMP_DIR/.sd_fzf_out_XXXXXX")
+    printf '%s\n%s\n' "$(printf "${GRN}▶  Start and show live output${NC}")" "$(printf "${DIM}   Start in the background${NC}")" | fzf "${FZF_BASE[@]}" --header="$(printf "${BLD}── Start ──${NC}")" >"$_fzf_out" 2>/dev/null &
+    _fzf_pid=$!; printf '%s' "$_fzf_pid" > "$TMP_DIR/.sd_active_fzf_pid"
+    wait "$_fzf_pid" 2>/dev/null; _frc=$?
+    local _start_choice; _start_choice=$(cat "$_fzf_out" 2>/dev/null | _trim_s); rm -f "$_fzf_out"
+    _sig_rc $_frc && { stty sane 2>/dev/null; continue; }
+    [[ $_frc -ne 0 ]] && return
+    if printf '%s' "$_start_choice" | _strip_ansi | grep -q "show live output"; then
         tmux switch-client -t "$sess" 2>/dev/null || true
         sleep 0.1; stty sane 2>/dev/null
         while IFS= read -r -t 0 -n 256 _ 2>/dev/null; do :; done
@@ -3455,7 +3255,7 @@ _start_group() {
             if [[ -n "$bcid" ]]; then
                 tmux_up "$(tsess "$bcid")" \
                     && printf '[%s] already running\n' "$bname" \
-                    || { _start_container "$bcid" background || true; }
+                    || { _start_container "$bcid" --auto || true; }
             else
                 printf '[!] Container not found: %s\n' "$bname" >&2
             fi
@@ -3768,10 +3568,7 @@ _groups_menu() {
         [[ $_frc -ne 0 || -z "${sel}" ]] && return
         local clean; clean=$(printf '%s' "$sel" | _trim_s)
         [[ "$clean" == "${L[back]}" ]] && return
-        if [[ "$clean" == *"${L[grp_new]}"* ]]; then
-            finput "Group name:" || continue
-            _create_group "${FINPUT_RESULT}"; continue
-        fi
+        [[ "$clean" == *"${L[grp_new]}"* ]] && { _create_group; continue; }
 
         for gid in "${groups[@]}"; do
             local gname; gname=$(_grp_read_field "$gid" name)
@@ -3783,8 +3580,8 @@ _groups_menu() {
 }
 
 _create_group() {
-    # arg $1=group_name (required — caller prompts)
-    local gname="${1//[^a-zA-Z0-9_\- ]/}"
+    finput "Group name:" || return 1
+    local gname="${FINPUT_RESULT//[^a-zA-Z0-9_\- ]/}"
     [[ -z "$gname" ]] && { pause "Name cannot be empty."; return 1; }
     local gid; gid=$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)
     printf 'name = %s\ndesc =\ncontainers =\nstart = {  }\n' "$gname" > "$(_grp_path "$gid")"
@@ -3880,10 +3677,11 @@ _create_manual_backup() {
 }
 
 _clone_from_snap() {
-    # args: $1=src_cid $2=snap_path $3=snap_label $4=clone_name (required — caller prompts)
-    local src_cid="$1" snap_path="$2" snap_label="$3" clone_name="$4"
+    local src_cid="$1" snap_path="$2" snap_label="$3"
     local src_name; src_name=$(_cname "$src_cid")
     [[ ! -d "$snap_path" ]] && { pause "Snapshot not found."; return 1; }
+    finput "Name for the clone:" || return 1
+    local clone_name="$FINPUT_RESULT"
     [[ -z "$clone_name" ]] && { pause "No name given."; return 1; }
     local clone_cid; clone_cid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -dc 'a-z0-9' | head -c 8 || tr -dc 'a-z0-9' < /dev/urandom | head -c 8)
     local clone_dir="$CONTAINERS_DIR/$clone_cid"
@@ -3955,15 +3753,9 @@ _clone_source_submenu() {
     local tag; tag=$(printf '%s' "$sel" | awk -F'\t' '{print $2}' | tr -d '[:space:]')
     [[ "$tag" == "__back__" || "$tag" == "__sep__" || -z "$tag" ]] && return
     case "$tag" in
-        current)
-            finput "Name for the clone:" || return 1
-            _clone_container "$src_cid" "$FINPUT_RESULT" ;;
-        post)
-            finput "Name for the clone:" || return 1
-            _clone_from_snap "$src_cid" "$pi_path" "Post-Installation" "$FINPUT_RESULT" ;;
-        *)
-            finput "Name for the clone:" || return 1
-            _clone_from_snap "$src_cid" "$sdir/$tag" "$tag" "$FINPUT_RESULT" ;;
+        current) _clone_container "$src_cid" ;;
+        post)    _clone_from_snap "$src_cid" "$pi_path" "Post-Installation" ;;
+        *)       _clone_from_snap "$src_cid" "$sdir/$tag" "$tag" ;;
     esac
 }
 
@@ -4006,35 +3798,27 @@ _install_method_menu() {
     local tag; tag=$(printf '%s' "$sel" | awk -F'\t' '{print $2}' | tr -d '[:space:]')
     [[ "$tag" == "__back__" || "$tag" == "__sep__" || -z "$tag" ]] && return 1
     case "$tag" in
-        bp:*)
-            local _bp_sug; _bp_sug=$(grep -m1 '^name[[:space:]]*=' "$(_bp_path "${tag#bp:}")" 2>/dev/null | cut -d= -f2- | sed 's/^[[:space:]]*//')
-            [[ -z "$_bp_sug" ]] && _bp_sug="${tag#bp:}"
-            finput "Container name (default: $_bp_sug):" || return 1
-            local _bp_ct="${FINPUT_RESULT:-$_bp_sug}"
-            _create_container "${tag#bp:}" "" "$_bp_ct" ;;
-        pbp:*)
-            finput "Container name (default: ${tag#pbp:}):" || return 1
-            local _pbp_ct="${FINPUT_RESULT:-${tag#pbp:}}"
-            _create_container "${tag#pbp:}" "" "$_pbp_ct" ;;
+        bp:*)    _create_container "${tag#bp:}" ;;
+        pbp:*)   _create_container "${tag#pbp:}" "" ;;
         ibp:*)
             local _iname="${tag#ibp:}"
             local _ipath; _ipath=$(_get_imported_bp_path "$_iname")
             [[ -z "$_ipath" ]] && { pause "Could not locate imported blueprint '$_iname'."; return 1; }
-            finput "Container name (default: $_iname):" || return 1
-            local _ibp_ct="${FINPUT_RESULT:-$_iname}"
-            _create_container "$_iname" "$_ipath" "$_ibp_ct" ;;
+            _create_container "$_iname" "$_ipath" ;;
         clone:*) _clone_source_submenu "${tag#clone:}" ;;
     esac
 }
 
 _clone_container() {
-    # args: $1=src_cid $2=clone_name (required — caller prompts)
-    local src_cid="$1" clone_name="$2"
+    local src_cid="$1"
     local src_name; src_name=$(_cname "$src_cid")
     local src_path; src_path=$(_cpath "$src_cid")
 
     [[ -z "$src_path" || ! -d "$src_path" ]] && { pause "Container not installed — nothing to clone."; return 1; }
     tmux_up "$(tsess "$src_cid")" && { pause "Stop '$src_name' before cloning."; return 1; }
+
+    finput "Name for the clone:" || return 1
+    local clone_name="$FINPUT_RESULT"
     [[ -z "$clone_name" ]] && { pause "No name given."; return 1; }
 
     local clone_cid; clone_cid=$(cat /proc/sys/kernel/random/uuid 2>/dev/null \
@@ -4159,8 +3943,7 @@ _container_backups_menu() {
             "Restore")      tmux_up "$(tsess "$cid")" && { pause "Stop the container before restoring."; continue; }
                             _do_restore_snap "$cid" "$sdir/$sel_id" "$sel_id" ;;
             "Create clone") tmux_up "$(tsess "$cid")" && { pause "Stop the container before cloning."; continue; }
-                            finput "Name for the clone:" || continue
-                            _clone_from_snap "$cid" "$sdir/$sel_id" "$sel_id" "$FINPUT_RESULT" ;;
+                            _clone_from_snap "$cid" "$sdir/$sel_id" "$sel_id" ;;
             "Delete")       confirm "Delete backup '$sel_id'?" || continue
                             _delete_backup "$sdir" "$sel_id"
                             pause "Backup '$sel_id' deleted." ;;
@@ -4322,11 +4105,7 @@ _pick_storage_profile() {
     local cid="$1"
     local stype; stype=$(_stor_type_from_sj "$cid")
     [[ "$(_stor_count "$cid")" -eq 0 ]] && return 0
-    if [[ -z "$STORAGE_DIR" || ! -d "$STORAGE_DIR" ]]; then
-        finput "$(printf 'New storage profile name:\n  (leave blank for Default)')" || return 1
-        local _sp_name="${FINPUT_RESULT:-Default}"
-        _stor_create_profile "$cid" "$stype" "$_sp_name"; return
-    fi
+    [[ -z "$STORAGE_DIR" || ! -d "$STORAGE_DIR" ]] && { _stor_create_profile "$cid" "$stype"; return; }
 
     local options=() scid_map=()
     local new_label; new_label="$(printf "${GRN}+  New profile…${NC}")"
@@ -4364,29 +4143,29 @@ _pick_storage_profile() {
     done
     local mapped="${scid_map[$i]:-}"
     [[ "$mapped" == "__inuse__" ]] && { pause "That profile is in use by another running container."; return 1; }
-    if [[ "$mapped" == "__new__" ]]; then
-        finput "$(printf 'New storage profile name:\n  (leave blank for Default)')" || return
-        local _sp_name="${FINPUT_RESULT:-Default}"
-        _stor_create_profile "$cid" "$stype" "$_sp_name"; return
-    fi
+    [[ "$mapped" == "__new__"   ]] && { _stor_create_profile "$cid" "$stype"; return; }
     [[ -n "$mapped" ]] && printf '%s' "$mapped"
 }
 
 _stor_create_profile() {
-    # args: $1=cid $2=stype $3=profile_name (optional, default "Default" — caller prompts)
-    local cid="$1" stype="$2" pname="${3:-Default}"
-    pname="${pname//[^a-zA-Z0-9_\- ]/}"; [[ -z "$pname" ]] && pname="Default"
+    local cid="$1" stype="$2"
     local existing_names=()
     for sdir in "$STORAGE_DIR"/*/; do
         [[ -d "$sdir" ]] || continue
         local sn; sn=$(_stor_read_name "$(basename "$sdir")")
         [[ "$(_stor_read_type "$(basename "$sdir")")" == "$stype" && -n "$sn" ]] && existing_names+=("$sn")
     done
-    local dup=false
-    for en in "${existing_names[@]}"; do [[ "$en" == "$pname" ]] && dup=true && break; done
-    if [[ "$dup" == "true" ]]; then
-        pause "A profile named '$pname' already exists for this type."; return 1
-    fi
+    local pname=""
+    while true; do
+        if ! finput "$(printf 'New storage profile name:\n  (leave blank for Default)')"; then
+            printf ''; return 1
+        fi
+        pname="${FINPUT_RESULT//[^a-zA-Z0-9_\- ]/}"; [[ -z "$pname" ]] && pname="Default"
+        local dup=false
+        for en in "${existing_names[@]}"; do [[ "$en" == "$pname" ]] && dup=true && break; done
+        [[ "$dup" == "true" ]] && { pause "A profile named '$pname' already exists for this type."; continue; }
+        break
+    done
     local new_scid
     while true; do
         new_scid=$(tr -dc 'a-z0-9' < /dev/urandom 2>/dev/null | head -c 8)
@@ -4909,12 +4688,7 @@ _do_pkg_update() {
     rm -f "$ok" "$fail"
     local scr; scr=$(mktemp "$TMP_DIR/.sd_pkgupd_XXXXXX.sh")
     local arch; [[ "$(uname -m)" == "aarch64" ]] && arch=arm64 || arch=amd64
-    local _sd_cfn='_chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
-}'
+    local _sd_cfn='_chroot_bash() { local r=$1; shift; local b=/bin/bash; [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }'
     local ok_q fail_q; ok_q=$(printf '%q' "$ok"); fail_q=$(printf '%q' "$fail")
     {
         printf '#!/usr/bin/env bash\n'
@@ -5193,8 +4967,7 @@ _installing_menu() {
 }
 
 _process_install_finish() {
-    # args: $1=cid $2=create_backup("ask"|"yes"|"no", default "ask")
-    local cid="$1" _create_backup="${2:-ask}" name; name=$(_cname "$cid")
+    local cid="$1" name; name=$(_cname "$cid")
     local ok_file="$CONTAINERS_DIR/$cid/.install_ok"
     local fail_file="$CONTAINERS_DIR/$cid/.install_fail"
     tmux kill-session -t "$(_inst_sess "$cid")" 2>/dev/null || true; _tmux_set SD_INSTALLING ""
@@ -5213,11 +4986,7 @@ _process_install_finish() {
         _write_pkg_manifest "$cid"
         local _ipath; _ipath=$(_cpath "$cid")
         [[ -n "$_ipath" && -f "$UBUNTU_DIR/.sd_ubuntu_stamp" ]] && cp "$UBUNTU_DIR/.sd_ubuntu_stamp" "$_ipath/.sd_ubuntu_stamp" 2>/dev/null || true
-        if [[ "${_create_backup:-ask}" == "ask" ]]; then
-            confirm "$(printf "'%s' ${L[msg_install_ok]}\n\nCreate a Post-Install backup?\n  (Instant revert to clean install)" "$name")" \
-                && _create_backup=yes || _create_backup=no
-        fi
-        if [[ "$_create_backup" == "yes" ]]; then
+        if confirm "$(printf "'%s' ${L[msg_install_ok]}\n\nCreate a Post-Install backup?\n  (Instant revert to clean install)" "$name")"; then
             local _pi_sdir; _pi_sdir=$(_snap_dir "$cid"); mkdir -p "$_pi_sdir" 2>/dev/null
             local _pi_id="Post-Installation" _pi_path; _pi_path=$(_cpath "$cid")
             local _pi_ts; _pi_ts=$(date '+%Y-%m-%d %H:%M')
@@ -5373,8 +5142,7 @@ ${DIM}  Scan to open on any LAN device (mDNS)${NC}")"                           
 }
 
 _create_container() {
-    # args: $1=bname $2=bfile(optional) $3=ct_name(optional — caller prompts if empty)
-    local bname="$1" bfile="${2:-}" ct_name="${3:-}"
+    local bname="$1" bfile="${2:-}"
     [[ -z "$bfile" ]] && bfile=$(_bp_path "$bname")
     local is_tmpfile=false
     if [[ -z "$bfile" || ! -f "$bfile" ]]; then
@@ -5408,18 +5176,33 @@ _create_container() {
     fi
     [[ -z "$suggested" ]] && suggested="$bname"
 
-    ct_name="${ct_name//[^a-zA-Z0-9_\-]/}"
-    [[ -z "$ct_name" ]] && ct_name="${suggested//[^a-zA-Z0-9_\-]/}"
+    local ct_name
+    while true; do
+        if ! finput "Container name (default: $suggested):"; then
+            [[ "$is_tmpfile" == true ]] && rm -f "$bfile"; return 1
+        fi
+        ct_name="${FINPUT_RESULT//[^a-zA-Z0-9_\-]/}"
+        [[ -z "$ct_name" ]] && ct_name="${suggested//[^a-zA-Z0-9_\-]/}"
 
-    local dup=false
-    for d in "$CONTAINERS_DIR"/*/; do
-        [[ -f "$d/state.json" ]] || continue
-        [[ "$(jq -r '.name // empty' "$d/state.json" 2>/dev/null)" == "$ct_name" ]] && dup=true && break
+        local dup=false
+        for d in "$CONTAINERS_DIR"/*/; do
+            [[ -f "$d/state.json" ]] || continue
+            [[ "$(jq -r '.name // empty' "$d/state.json" 2>/dev/null)" == "$ct_name" ]] && dup=true && break
+        done
+        if [[ "$dup" == "true" ]]; then [[ "$is_tmpfile" == true ]] && rm -f "$bfile"; pause "A container named '$ct_name' already exists."; return 1; fi
+
+        local _fzf_out _fzf_pid _frc
+        _fzf_out=$(mktemp "$TMP_DIR/.sd_fzf_out_XXXXXX")
+        printf '%s\n%s\n' "$(printf "${GRN}▶  Continue${NC}")" "$(printf "${DIM}   Change name${NC}")" | fzf "${FZF_BASE[@]}" --header="$(printf "${BLD}── Container name ──${NC}")" >"$_fzf_out" 2>/dev/null &
+        _fzf_pid=$!; printf '%s' "$_fzf_pid" > "$TMP_DIR/.sd_active_fzf_pid"
+        wait "$_fzf_pid" 2>/dev/null; _frc=$?
+        local name_choice; name_choice=$(cat "$_fzf_out" 2>/dev/null | _trim_s); rm -f "$_fzf_out"
+        _sig_rc $_frc && { stty sane 2>/dev/null; continue; }
+        [[ $_frc -ne 0 ]] && return
+        local name_choice_clean; name_choice_clean=$(printf '%s' "$name_choice" | _trim_s)
+        [[ "$name_choice_clean" == *"Change name"* ]] && continue
+        break
     done
-    if [[ "$dup" == "true" ]]; then
-        [[ "$is_tmpfile" == true ]] && rm -f "$bfile"
-        pause "A container named '$ct_name' already exists."; return 1
-    fi
 
     local cid; cid=$(_rand_id)
     mkdir -p "$CONTAINERS_DIR/$cid" 2>/dev/null
@@ -5456,22 +5239,24 @@ _edit_container_bp() {
 }
 
 _rename_container() {
-    # args: $1=cid $2=new_name (required — caller prompts)
     local cid="$1" name; name=$(_cname "$cid")
-    local new_ct_name="${2//[^a-zA-Z0-9_\-]/}"
     [[ "$(_st "$cid" installed)" == "true" ]] && { pause "Rename is only available for uninstalled containers."; return 1; }
-    [[ -z "$new_ct_name" ]] && { pause "Name cannot be empty."; return 1; }
-    local dup_found=false
-    for dd in "$CONTAINERS_DIR"/*/; do
-        [[ -f "$dd/state.json" ]] || continue
-        local en; en=$(jq -r '.name // empty' "$dd/state.json" 2>/dev/null)
-        [[ "$en" == "$new_ct_name" && "$(basename "$dd")" != "$cid" ]] && dup_found=true && break
+    while true; do
+        finput "New name for '$name':" || return 1
+        local new_ct_name; new_ct_name="${FINPUT_RESULT//[^a-zA-Z0-9_\-]/}"
+        [[ -z "$new_ct_name" ]] && { pause "Name cannot be empty."; continue; }
+        local dup_found=false
+        for dd in "$CONTAINERS_DIR"/*/; do
+            [[ -f "$dd/state.json" ]] || continue
+            local en; en=$(jq -r '.name // empty' "$dd/state.json" 2>/dev/null)
+            [[ "$en" == "$new_ct_name" && "$(basename "$dd")" != "$cid" ]] && dup_found=true && break
+        done
+        [[ "$dup_found" == "true" ]] && { pause "A container named '$new_ct_name' already exists."; continue; }
+        jq --arg n "$new_ct_name" '.name=$n' "$CONTAINERS_DIR/$cid/state.json" \
+            > "$CONTAINERS_DIR/$cid/state.json.tmp" \
+            && mv "$CONTAINERS_DIR/$cid/state.json.tmp" "$CONTAINERS_DIR/$cid/state.json" 2>/dev/null
+        pause "Container renamed to '$new_ct_name'."; return 0
     done
-    [[ "$dup_found" == "true" ]] && { pause "A container named '$new_ct_name' already exists."; return 1; }
-    jq --arg n "$new_ct_name" '.name=$n' "$CONTAINERS_DIR/$cid/state.json" \
-        > "$CONTAINERS_DIR/$cid/state.json.tmp" \
-        && mv "$CONTAINERS_DIR/$cid/state.json.tmp" "$CONTAINERS_DIR/$cid/state.json" 2>/dev/null
-    pause "Container renamed to '$new_ct_name'."; return 0
 }
 
 _container_submenu() {
@@ -5618,32 +5403,11 @@ _container_submenu() {
             "${L[ct_finish_inst]}"|"✓  Finish update") _process_install_finish "$cid" ;;
             "${L[ct_install]}")
                 _guard_install || continue
-                if _is_installing "$cid"; then
-                    confirm "$(printf '⚠  %s is already installing.\n\n  Running it again will restart from scratch.\n  Continue?' "$(_cname "$cid")")" || continue
-                    _run_job install "$cid" yes
-                else
-                    _run_job install "$cid"
-                fi
-                _cleanup_upd_tmps ;;
-            "${L[ct_start]}")
-                local _fzf_out _fzf_pid _frc _scid_pick=""
-                if [[ "$(_stor_count "$cid")" -gt 0 ]]; then
-                    _scid_pick=$(_pick_storage_profile "$cid") || { _cleanup_upd_tmps; continue; }
-                    [[ -z "$_scid_pick" ]] && { _cleanup_upd_tmps; continue; }
-                fi
-                _fzf_out=$(mktemp "$TMP_DIR/.sd_fzf_out_XXXXXX")
-                printf '%s\n%s\n' "$(printf "${GRN}▶  Start and show live output${NC}")" "$(printf "${DIM}   Start in the background${NC}")" | fzf "${FZF_BASE[@]}" --header="$(printf "${BLD}── Start ──${NC}")" >"$_fzf_out" 2>/dev/null &
-                _fzf_pid=$!; printf '%s' "$_fzf_pid" > "$TMP_DIR/.sd_active_fzf_pid"
-                wait "$_fzf_pid" 2>/dev/null; _frc=$?
-                local _sc; _sc=$(cat "$_fzf_out" 2>/dev/null | _trim_s); rm -f "$_fzf_out"
-                _sig_rc $_frc && { stty sane 2>/dev/null; _cleanup_upd_tmps; continue; }
-                [[ $_frc -ne 0 ]] && { _cleanup_upd_tmps; continue; }
-                local _att="background"
-                printf '%s' "$_sc" | _strip_ansi | grep -q "show live output" && _att="attach"
-                _start_container "$cid" "$_att" "$_scid_pick"; _cleanup_upd_tmps ;;
+                _run_job install "$cid"; _cleanup_upd_tmps ;;
+            "${L[ct_start]}")       _start_container "$cid"; _cleanup_upd_tmps ;;
             "${L[ct_attach]}")      _tmux_attach_hint "$name" "$(tsess "$cid")" ;;
             "${L[ct_stop]}")        confirm "Stop '$name'?" || continue; _stop_container "$cid" ;;
-            "${L[ct_restart]}")     _stop_container "$cid"; sleep 0.3; _start_container "$cid" background ;;
+            "${L[ct_restart]}")     _stop_container "$cid"; sleep 0.3; _start_container "$cid" ;;
             "${L[ct_open_in]}")     _open_in_submenu "$cid" ;;
             *"⏱"*)
                 local _cron_clicked; _cron_clicked=$(printf '%s' "$REPLY" | _strip_ansi | sed 's/^[[:space:]]*//' | grep -oP '(?<=⏱  )[^\[]+' | sed 's/[[:space:]]*$//')
@@ -5678,14 +5442,10 @@ _container_submenu() {
                     pause "No log yet for '$name'."
                 fi ;;
             "${L[ct_edit]}")  _edit_container_bp "$cid" || continue ;;
-            "${L[ct_rename]}")
-                finput "New name for '$name':" || continue
-                _rename_container "$cid" "$FINPUT_RESULT" ;;
+            "${L[ct_rename]}")  _rename_container "$cid" ;;
             "${L[ct_backups]}")  _container_backups_menu "$cid" ;;
             "${L[ct_profiles]}") _stor_ctx_cid="$cid"; _persistent_storage_menu "$cid"; _stor_ctx_cid="" ;;
-            *"Clone container"*)
-                finput "Name for the clone:" || continue
-                _clone_container "$cid" "$FINPUT_RESULT" ;;
+            *"Clone container"*) _clone_container "$cid" ;;
             "⚙  Management"*) ;; # no-op, replaced by inline section
             "◦  Edit blueprint"|"${L[ct_edit]}"*)  _edit_container_bp "$cid" || continue ;;
             *"Installation"*) ;; # no-op, flattened
@@ -6778,12 +6538,7 @@ _ubuntu_pkg_tmux() {
     local ok_file="$UBUNTU_DIR/.upkg_ok" fail_file="$UBUNTU_DIR/.upkg_fail"
     rm -f "$ok_file" "$fail_file"
     local script; script=$(mktemp "$TMP_DIR/.sd_upkg_XXXXXX.sh")
-    local _sd_cfn='_chroot_bash() {
-    local r=$1; shift; local b=/bin/bash
-    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
-    [[ ! -e "$r$b" ]] && b=/bin/sh
-    sudo -n chroot "$r" "$b" "$@"
-}'
+    local _sd_cfn='_chroot_bash() { local r=$1; shift; local b=/bin/bash; [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }'
     local inner_script; inner_script=$(mktemp "$TMP_DIR/.sd_upkg_inner_XXXXXX.sh")
     printf '#!/bin/sh\nset -e\n%s\n' "$cmd" > "$inner_script"
     chmod +x "$inner_script"
@@ -6791,12 +6546,10 @@ _ubuntu_pkg_tmux() {
         printf '#!/usr/bin/env bash\n'
         printf '%s\n' "$_sd_cfn"
         printf 'trap '\'''\'' INT\n'
-        printf 'trap "sudo -n umount -lf %q/dev %q/sys %q/proc 2>/dev/null || true" EXIT\n' "$chroot_dir" "$chroot_dir" "$chroot_dir"
         printf 'printf "\\033[1m── %s ──\\033[0m\\n\\n"\n' "$title"
         printf 'sudo -n mount --bind /proc %q/proc 2>/dev/null || true\n' "$chroot_dir"
         printf 'sudo -n mount --bind /sys  %q/sys  2>/dev/null || true\n' "$chroot_dir"
         printf 'sudo -n mount --bind /dev  %q/dev  2>/dev/null || true\n' "$chroot_dir"
-        printf 'touch %q/tmp/.sd_upkg_inner.sh 2>/dev/null || true\n' "$chroot_dir"
         printf 'sudo -n mount --bind %q %q/tmp/.sd_upkg_inner.sh 2>/dev/null || cp %q %q/tmp/.sd_upkg_inner.sh 2>/dev/null || true\n' \
             "$inner_script" "$chroot_dir" "$inner_script" "$chroot_dir"
         printf 'if _chroot_bash %q /tmp/.sd_upkg_inner.sh; then\n' "$chroot_dir"
@@ -7171,18 +6924,7 @@ _help_menu() {
                 rm -rf "$CACHE_DIR/sd_size" "$CACHE_DIR/gh_tag" 2>/dev/null || true
                 mkdir -p "$CACHE_DIR/sd_size" "$CACHE_DIR/gh_tag" 2>/dev/null
                 pause "Cache cleared." ;;
-            *"Resize image"*)
-                local _cur_bytes; _cur_bytes=$(stat -c%s "$IMG_PATH" 2>/dev/null)
-                local _cur_gib;   _cur_gib=$(awk "BEGIN{printf \"%.1f\",$_cur_bytes/1073741824}")
-                local _used_bytes=0
-                mountpoint -q "$MNT_DIR" 2>/dev/null && \
-                    _used_bytes=$(btrfs filesystem usage -b "$MNT_DIR" 2>/dev/null | grep -i used | head -1 | grep -oP '[0-9]+' | tail -1 || echo 0)
-                [[ -z "$_used_bytes" || "$_used_bytes" == "0" ]] && \
-                    _used_bytes=$(df -k "$MNT_DIR" 2>/dev/null | awk 'NR==2{print $3*1024}')
-                local _used_gib; _used_gib=$(awk "BEGIN{printf \"%.1f\",$_used_bytes/1073741824}")
-                local _min_gib;  _min_gib=$(awk "BEGIN{print int($_used_bytes/1073741824)+1+10}")
-                finput "$(printf 'Current: %s GB   Used: %s GB   Minimum: %s GB\n\nNew size in GB:' "$_cur_gib" "$_used_gib" "$_min_gib")" || continue
-                _resize_image "${FINPUT_RESULT}" ;;
+            *"Resize image"*)       _resize_image ;;
             *"Manage Encryption"*)  _enc_menu ;;
             *"Profiles & data"*) _persistent_storage_menu; continue ;;
             *"Backups"*)            _manage_backups_menu ;;
@@ -7226,7 +6968,7 @@ _SEP="$(printf     "${BLD}  ─────────────────�
 
 main_menu() {
     while true; do
-        clear; _cleanup_stale_lock; _load_containers false
+        clear; _cleanup_stale_lock; _validate_containers; _load_containers false
         local inst_id; inst_id=$(_installing_id)
 
         local n_running=0 n_groups=0 n_bps=0
@@ -7245,10 +6987,8 @@ main_menu() {
         for gid in "${grp_ids[@]}"; do
             local grunning=0
             while IFS= read -r cname; do
-                # Use already-loaded CT_IDS/CT_NAMES (avoids jq per member)
-                local _gi; for _gi in "${!CT_NAMES[@]}"; do
-                    [[ "${CT_NAMES[$_gi]}" == "$cname" ]] && tmux_up "$(tsess "${CT_IDS[$_gi]}")" && (( grunning++ )) && break
-                done
+                local gcid; gcid=$(_ct_id_by_name "$cname")
+                [[ -n "$gcid" ]] && tmux_up "$(tsess "$gcid")" && (( grunning++ )) || true
             done < <(_grp_containers "$gid")
             [[ $grunning -gt 0 ]] && (( grp_n_active++ )) || true
         done
@@ -7324,46 +7064,22 @@ _containers_submenu() {
 
         for i in "${!CT_IDS[@]}"; do
             local cid="${CT_IDS[$i]}" n="${CT_NAMES[$i]}"
-            # Batch-read service.json and state.json once per container (replaces 6+ individual jq calls)
-            local _sj="$CONTAINERS_DIR/$cid/service.json"
-            local _stj="$CONTAINERS_DIR/$cid/state.json"
-            local _data; _data=$(jq -rn '
-                (input // {}) as $sj | (input // {}) as $stj |
-                [
-                    ($sj.meta.dialogue // ""),
-                    ($sj.meta.port // ""),
-                    ($sj.environment.PORT // ""),
-                    ($sj.meta.health // "false"),
-                    ($stj.installed // "false"),
-                    ($stj.install_path // "")
-                ] | @tsv' "$_sj" "$_stj" 2>/dev/null)
-            
-            local dialogue; dialogue=$(printf '%s' "$_data" | cut -f1)
-            local _list_port; _list_port=$(printf '%s' "$_data" | cut -f2)
-            local _list_ep;   _list_ep=$(printf '%s' "$_data" | cut -f3)
-            local _sj_health; _sj_health=$(printf '%s' "$_data" | cut -f4)
-            local _installed; _installed=$(printf '%s' "$_data" | cut -f5)
-            local _ip_rel;    _ip_rel=$(printf '%s' "$_data" | cut -f6)
-            
-            [[ -n "$_list_ep" ]] && _list_port="$_list_ep"
-            local _ipath; [[ -n "$_ip_rel" ]] && _ipath="$INSTALLATIONS_DIR/$_ip_rel" || _ipath=""
-            
+            local dialogue; dialogue=$(jq -r '.meta.dialogue // empty' "$CONTAINERS_DIR/$cid/service.json" 2>/dev/null)
             local dot
             local _cok="$CONTAINERS_DIR/$cid/.install_ok" _cfail="$CONTAINERS_DIR/$cid/.install_fail"
             if   _is_installing "$cid" || [[ -f "$_cok" || -f "$_cfail" ]]; then dot="${YLW}◈${NC}"
             elif tmux_up "$(tsess "$cid")"; then
                 (( n_running_ct++ )) || true
-                # Health check only if health=true and port set (avoids nc call otherwise)
-                if [[ "$_sj_health" == "true" && -n "$_list_port" && "$_list_port" != "0" ]] && nc -z -w1 127.0.0.1 "$_list_port" 2>/dev/null; then
-                    dot="${GRN}◈${NC}"
+                if _health_check "$cid"; then dot="${GRN}◈${NC}"
                 else dot="${YLW}◈${NC}"; fi
-            elif [[ "$_installed" == "true" ]]; then dot="${RED}◈${NC}"
+            elif [[ "$(_st "$cid" installed)" == "true" ]]; then dot="${RED}◈${NC}"
             else dot="${DIM}◈${NC}"; fi
             local disp_name
             [[ -n "$dialogue" ]] \
                 && disp_name="$(printf "%s  \033[2m— %s\033[0m" "$n" "$dialogue")" \
                 || disp_name="$n"
             local _sz_lbl=""
+            local _ipath; _ipath=$(_cpath "$cid")
             if [[ -d "$_ipath" ]]; then
                 local _sz_cache="$CACHE_DIR/sd_size/$cid"
                 if [[ -f "$_sz_cache" ]]; then
@@ -7376,8 +7092,11 @@ _containers_submenu() {
                     disown 2>/dev/null || true
                 fi
             fi
+            local _list_port; _list_port=$(jq -r '.meta.port // empty' "$CONTAINERS_DIR/$cid/service.json" 2>/dev/null)
+            local _list_ep; _list_ep=$(jq -r '.environment.PORT // empty' "$CONTAINERS_DIR/$cid/service.json" 2>/dev/null)
+            [[ -n "$_list_ep" ]] && _list_port="$_list_ep"
             local _list_ip_lbl=""
-            if [[ -n "$_list_port" && "$_list_port" != "0" && "$_installed" == "true" ]]; then
+            if [[ -n "$_list_port" && "$_list_port" != "0" && "$(_st "$cid" installed)" == "true" ]]; then
                 local _list_ip; _list_ip=$(_netns_ct_ip "$cid" "$MNT_DIR")
                 _list_ip_lbl="$(printf "\033[2m[%s:%s]\033[0m " "$_list_ip" "$_list_port")"
             fi
@@ -7588,40 +7307,14 @@ _blueprints_submenu() {
     done
 }
 
-_sweep_stale() {
-    # 1. Kill stale tmux sessions from previous runs
-    tmux list-sessions -F "#{session_name}" 2>/dev/null | grep -E "^sd_|sdInst_|sdCron_|sdResize" | xargs -I{} tmux kill-session -t {} 2>/dev/null || true
-
-    # 2. Unmount everything under SD_MNT_BASE
-    [[ -d "$SD_MNT_BASE" ]] && {
-        local _all_submounts; _all_submounts=$(findmnt -n -o TARGET -R "$SD_MNT_BASE" 2>/dev/null | grep -v "^$SD_MNT_BASE$" | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
-        if [[ -n "$_all_submounts" ]]; then
-            while IFS= read -r _sm; do
-                sudo -n umount -lf "$_sm" 2>/dev/null || true
-            done <<< "$_all_submounts"
-        fi
-    }
-
-    # 3. Close stale LUKS mappers and detach their loops
-    for _mp in /dev/mapper/sd_*; do
-        [[ -b "$_mp" ]] || continue
-        local _sd_dm_name="${_mp##*/}"
-        local _sd_dm_lo; _sd_dm_lo=$(sudo -n cryptsetup status "$_sd_dm_name" 2>/dev/null | grep 'device:' | awk '{print $2}')
-        sudo -n cryptsetup close "$_sd_dm_name" 2>/dev/null || true
-        [[ -n "$_sd_dm_lo" && "$_sd_dm_lo" == /dev/loop* ]] && sudo -n losetup -d "$_sd_dm_lo" 2>/dev/null || true
-    done
-
-    # 4. Detach ANY other loop devices backing simpleDocker images
-    sudo -n losetup -a 2>/dev/null | grep "simpleDocker" | cut -d: -f1 | while read -r _sd_lo; do
-        sudo -n losetup -d "$_sd_lo" 2>/dev/null || true
-    done
-
-    rm -rf "$SD_MNT_BASE" 2>/dev/null || true
-    mkdir -p "$SD_MNT_BASE" "$TMP_DIR" 2>/dev/null || true
-}
-
 _require_sudo
 tmux set-environment SD_READY 1 2>/dev/null || true
-_sweep_stale
+for _sd_stale in "$SD_MNT_BASE"/mnt_*; do
+    [[ -d "$_sd_stale" ]] || continue
+    mountpoint -q "$_sd_stale" 2>/dev/null && sudo -n umount -lf "$_sd_stale" 2>/dev/null || true
+done
+unset _sd_stale
+rm -rf "$SD_MNT_BASE" 2>/dev/null || true
+mkdir -p "$SD_MNT_BASE" "$TMP_DIR" 2>/dev/null || true
 _setup_image
-main_menu
+main_menu 
