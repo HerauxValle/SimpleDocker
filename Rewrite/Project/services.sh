@@ -2510,7 +2510,7 @@ GHBLOCK
         printf '_SD_RUN_EOF\n'
         printf 'chmod +x "$_sd_run_cmd"\n'
         
-        printf '_chroot_bash %s /tmp/$(basename "$_sd_run_cmd")\n' "$_ip_q3"
+        printf 'sudo -n chroot %s /bin/bash /tmp/$(basename "$_sd_run_cmd")\n' "$_ip_q3"
         printf '_sd_run_rc=$?\n'
         printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q3" "$_ip_q3" "$_ip_q3"
         printf 'rm -f "$_sd_run_cmd" 2>/dev/null || true\n'
@@ -2567,7 +2567,8 @@ _sd_sp=$(python3 -c "import sys; print(next((p for p in sys.path if 'site-packag
 _sd_vsp=$(compgen -G "$CONTAINER_ROOT/venv/lib/python*/site-packages" 2>/dev/null | head -1) || true
 [[ -n "$_sd_vsp" ]] && export PYTHONPATH="$_sd_vsp${PYTHONPATH:+:$PYTHONPATH}"
 mkdir -p "$HOME" "$XDG_CACHE_HOME" "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$XDG_STATE_HOME" \
-         "$CONTAINER_ROOT/bin" "$CONTAINER_ROOT/.local/bin" 2>/dev/null
+         "$CONTAINER_ROOT/.local/bin" 2>/dev/null
+[[ ! -e "$CONTAINER_ROOT/bin" ]] && mkdir -p "$CONTAINER_ROOT/bin" 2>/dev/null || true
 ENVBLOCK
 
     local gpu_flag; gpu_flag=$(jq -r '.meta.gpu // empty' "$sj" 2>/dev/null)
@@ -2822,7 +2823,7 @@ _run_job() {
                     printf '_sd_deps_cmd=$(mktemp %s/tmp/.sd_deps_XXXXXX.sh 2>/dev/null || echo %s/tmp/.sd_deps_%s.sh)\n' "$_ip_q2" "$_ip_q2" "$$"
                     printf 'printf '"'"'#!/bin/sh\nset -e\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s 2>&1 || { apt-get update -qq 2>&1 && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends %s 2>&1; }\n'"'"' > "$_sd_deps_cmd"\n' "$SD_APK_PKGS" "$SD_APK_PKGS"
                     printf 'chmod +x "$_sd_deps_cmd"\n'
-                    printf '_chroot_bash %s /tmp/$(basename "$_sd_deps_cmd")\n' "$_ip_q2"
+                    printf 'sudo -n chroot %s /bin/bash /tmp/$(basename "$_sd_deps_cmd")\n' "$_ip_q2"
                     printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q2" "$_ip_q2" "$_ip_q2"
                     printf 'rm -f "$_sd_deps_cmd" 2>/dev/null || true\n'
                     printf 'sudo -n rm -f %q 2>/dev/null || true\n\n' "$_sudoers_q"
@@ -2885,7 +2886,7 @@ print("\n".join(expand(sys.stdin.read())))
                 printf '/venv/bin/pip install --upgrade %s\n' "$_pip_pkgs"
                 printf '_SD_PIP_EOF\n'
                 printf 'chmod +x "$_sd_pip_cmd"\n'
-                printf '_chroot_bash %s /tmp/$(basename "$_sd_pip_cmd")\n' "$_ip_q"
+                printf 'sudo -n chroot %s /bin/bash /tmp/$(basename "$_sd_pip_cmd")\n' "$_ip_q"
                 printf '_sd_pip_rc=$?\n'
                 printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_q" "$_ip_q" "$_ip_q"
                 printf 'rm -f "$_sd_pip_cmd" 2>/dev/null || true\n'
@@ -2924,7 +2925,7 @@ print("\n".join(expand(sys.stdin.read())))
                 printf 'npm install %s 2>&1\n' "$_npm_pkgs"
                 printf '_SD_NPM_EOF\n'
                 printf 'chmod +x "$_sd_npm_cmd"\n'
-                printf '_chroot_bash %s /tmp/$(basename "$_sd_npm_cmd")\n' "$_ip_qn"
+                printf 'sudo -n chroot %s /bin/bash /tmp/$(basename "$_sd_npm_cmd")\n' "$_ip_qn"
                 printf '_sd_npm_rc=$?\n'
                 printf 'sudo -n umount -lf %s/dev %s/sys %s/proc 2>/dev/null || true\n' "$_ip_qn" "$_ip_qn" "$_ip_qn"
                 printf 'rm -f "$_sd_npm_cmd" 2>/dev/null || true\n'
