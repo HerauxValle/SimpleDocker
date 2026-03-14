@@ -165,10 +165,11 @@ def check_deps(mode='ask') -> bool:
     if mode == 'ask': return False
     # mode == 'yes': install
     pkg_map = {'btrfs':'btrfs-progs','ip':'iproute2'}
-    if shutil.which('pacman'):   pm = ['sudo','pacman','-S','--noconfirm']
+    if shutil.which('pacman'):    pm = ['sudo','pacman','-S','--noconfirm']
     elif shutil.which('apt-get'): pm = ['sudo','apt-get','install','-y']
     elif shutil.which('dnf'):     pm = ['sudo','dnf','install','-y']
-    else: print("No package manager"); sys.exit(1)
+    elif shutil.which('zypper'):  pm = ['sudo','zypper','install','-y']
+    else: print("No known package manager found"); sys.exit(1)
     for t in missing:
         subprocess.run(pm+[pkg_map.get(t,t)], capture_output=True)
     return True
@@ -260,12 +261,13 @@ def _sep(title: str, width: int=38) -> str:
 def _nav_sep() -> str: return _sep('Navigation',38)
 def _back_item() -> str: return f'{DIM} {L["back"]}{NC}'
 
-_SIG_RCS = {130, 137, 138, 143}  # SIGUSR1/SIGTERM/SIGKILL killed fzf
+_SIG_RCS = {137, 138, 143}   # signal-killed fzf (SIGKILL/SIGTERM/SIGUSR1) → refresh
+_ABORT_RCS = {1, 130}        # fzf quit/ESC → go back (return None without setting usr1_fired)
 
 def fzf_run(items: List[str], header: str='', extra: list=None,
             with_nth: str=None, delimiter: str=None) -> Optional[str]:
     """Core fzf wrapper — returns stripped selection or None.
-    Sets G.usr1_fired=True when fzf was signal-killed (SIGUSR1 refresh)."""
+    Sets G.usr1_fired=True only when fzf was signal-killed (not on ESC/abort)."""
     args = ['fzf'] + FZF_BASE + [f'--header={header}']
     if extra: args += extra
     if with_nth: args += [f'--with-nth={with_nth}', f'--delimiter={delimiter or chr(9)}']
@@ -280,7 +282,7 @@ def fzf_run(items: List[str], header: str='', extra: list=None,
     if proc.returncode in _SIG_RCS:
         G.usr1_fired = True
         return None
-    if proc.returncode != 0: return None
+    if proc.returncode != 0: return None   # includes ESC (130) and no-match (1) — just go back
     return out.decode().strip()
 
 def confirm(msg: str) -> bool:
@@ -294,19 +296,18 @@ def pause(msg: str='Done.'):
             header=f'{DIM}{L["ok_press"]}{NC}')
 
 def finput(prompt: str) -> Optional[str]:
-    """Returns typed text or None on ESC."""
-    args = ['fzf'] + FZF_BASE + [
-        f'--header={BLD}{prompt}{NC}\n{DIM}  {L["type_enter"]}{NC}',
-        '--print-query','--read0',
-    ]
-    proc = subprocess.Popen(['fzf']+FZF_BASE+[
-        f'--header={BLD}{prompt}{NC}\n{DIM}  {L["type_enter"]}{NC}',
-        '--print-query'],
+    """Returns typed text or None on ESC/signal-kill."""
+    proc = subprocess.Popen(
+        ['fzf'] + FZF_BASE + [
+            f'--header={BLD}{prompt}{NC}\n{DIM}  {L["type_enter"]}{NC}',
+            '--print-query',
+        ],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     G.active_fzf_pid = proc.pid
     out, _ = proc.communicate(b'')
     G.active_fzf_pid = None
-    if proc.returncode not in (0,1): return None
+    # rc=0: selection made, rc=1: no match (just typed text), other: ESC/signal → None
+    if proc.returncode not in (0, 1): return None
     lines = out.decode().splitlines()
     return lines[0] if lines else ''
 
@@ -381,12 +382,28 @@ def is_installing(cid: str) -> bool:
 def log_path(cid: str, kind='start') -> Path:
     return G.logs_dir/f'{cname(cid)}-{cid}-{kind}.log'
 
+def log_write(cid: str, kind: str, *lines: str):
+    """Append lines to a capped log file (max 10MB). Matches shell _log_write."""
+    if not G.logs_dir: return
+    f = log_path(cid, kind)
+    try:
+        with open(f, 'a') as fh:
+            for line in lines: fh.write(line + '\n')
+        # Rotate if > 10MB
+        sz = f.stat().st_size
+        if sz > 10_485_760:
+            keep = int(sz * 0.8)
+            data = f.read_bytes()
+            f.write_bytes(data[-keep:])
+    except: pass
+
 # ══════════════════════════════════════════════════════════════════════════════
 # image/btrfs.py — btrfs snapshot helpers
 # ══════════════════════════════════════════════════════════════════════════════
 
 def snap_dir(cid: str) -> Path:
-    return G.installations_dir/'.snaps'/cid
+    """Backup snapshots live in Backup/<cid>/ — matches .sh _snap_dir exactly."""
+    return G.backup_dir/cid
 
 def rand_snap_id(sdir: Path) -> str:
     import random, string
@@ -583,6 +600,22 @@ def proxy_stop():
 # image/mount.py — disk image setup, mount, create
 # ══════════════════════════════════════════════════════════════════════════════
 
+def validate_containers():
+    """Clear stale installed=true entries for containers whose install path no longer exists.
+    Matches shell _validate_containers — called once after mount."""
+    if not G.containers_dir or not G.containers_dir.is_dir(): return
+    for d in G.containers_dir.iterdir():
+        sf = d/'state.json'
+        if not sf.exists(): continue
+        try: data = json.loads(sf.read_text())
+        except: continue
+        if not data.get('installed'): continue
+        ip = G.installations_dir/data['install_path'] if data.get('install_path') else None
+        if ip and ip.is_dir(): continue
+        # Installation path missing — clear installed flag
+        data['installed'] = False
+        sf.write_text(json.dumps(data, indent=2))
+
 def set_img_dirs():
     G.blueprints_dir    = G.mnt_dir/'Blueprints'
     G.containers_dir    = G.mnt_dir/'Containers'
@@ -597,6 +630,70 @@ def set_img_dirs():
               G.backup_dir,G.storage_dir,G.ubuntu_dir,G.groups_dir,
               G.logs_dir,G.cache_dir/'gh_tag',G.cache_dir/'sd_size']:
         d.mkdir(parents=True, exist_ok=True)
+    # chown dirs to current user (§2.11)
+    _sudo('chown',f'{os.getuid()}:{os.getgid()}',
+          str(G.blueprints_dir), str(G.containers_dir), str(G.installations_dir),
+          str(G.backup_dir), str(G.storage_dir), str(G.ubuntu_dir),
+          str(G.groups_dir), str(G.logs_dir), capture=True)
+    # Clear stale installed=true entries (§2.5)
+    validate_containers()
+    # Seed persistent blueprints on first mount (§2.10)
+    _seed_persistent_blueprints()
+
+_SD_PERSISTENT_BLUEPRINTS = {
+    'Counter': '''\
+[container]
+[meta]
+name = counter-test
+version = 2.0.0
+port = 8833
+dialogue = Feature test
+storage_type = counter-test
+health = true
+log = logs/counter.log
+
+[dirs]
+logs
+
+[install]
+for i in $(seq 1 10); do
+  printf '%d\\n' "$i"
+  sleep 0.2
+done
+printf 'Install done.\\n'
+
+[start]
+mkdir -p "$CONTAINER_ROOT/logs"
+n=1
+while true; do
+  printf '[%s] tick %d\\n' "$(date '+%H:%M:%S')" "$n" | tee -a "$CONTAINER_ROOT/logs/counter.log"
+  (( n++ ))
+  sleep 1
+done
+
+[actions]
+Reset log | printf '' > "$CONTAINER_ROOT/logs/counter.log" && printf 'Log cleared.\\n'
+Show log tail | tail -20 "$CONTAINER_ROOT/logs/counter.log"
+
+[cron]
+10s [ping] | printf '[cron] ping at %s\\n' "$(date '+%H:%M:%S')" >> logs/counter.log
+1m [minutely] | printf '[cron] 1min heartbeat\\n' >> logs/counter.log
+
+[/container]
+''',
+}
+
+def _seed_persistent_blueprints():
+    """Write built-in blueprints to .sd/persistent_blueprints/, always overwriting so
+    any update to _SD_PERSISTENT_BLUEPRINTS is immediately reflected on disk.
+    Matches shell behaviour: persistent BPs are embedded in the script and always
+    current — they never go stale."""
+    if not G.mnt_dir: return
+    pd = G.mnt_dir/'.sd/persistent_blueprints'
+    pd.mkdir(parents=True, exist_ok=True)
+    for name, content in _SD_PERSISTENT_BLUEPRINTS.items():
+        dest = pd/f'{name}.container'
+        dest.write_text(content)  # always overwrite — keeps disk in sync with dict
 
 def mount_img(img: Path) -> bool:
     mnt = G.sd_mnt_base/f'mnt_{hashlib.md5(str(img).encode()).hexdigest()[:8]}'
@@ -759,7 +856,7 @@ def create_img(name: str, size_gb: int, dest_dir: Path) -> bool:
         vs_auth.unlink(missing_ok=True); vs_new.unlink(missing_ok=True)
     # ── BTRFS subvolumes ───────────────────────────────────────────────────
     for sv in ['Blueprints','Containers','Installations','Backup','Storage','Ubuntu','Groups']:
-        _sudo('btrfs','subvolume','create',str(mnt/sv))
+        _sudo('btrfs','subvolume','create',str(mnt/sv), capture=True)  # suppress "Create subvolume" stdout
     set_img_dirs()
     netns_setup(mnt)
     save_known_img(img)
@@ -835,7 +932,9 @@ def setup_image():
         choice = fzf_run(lines,
             header=f'{BLD}── simpleDocker ──{NC}',
             extra=['--height=40%','--reverse','--border=rounded','--margin=1,2','--no-info'])
-        if choice is None: os.system('clear'); _force_quit()
+        if choice is None:
+            if G.usr1_fired: G.usr1_fired = False; continue
+            os.system('clear'); _force_quit()
         sc = clean(choice)
         if L['img_select'] in sc:
             f = pick_file()
@@ -885,6 +984,9 @@ def netns_setup(mnt: Path=None):
     br=f'sd-br{idx}'; vh=f'sd-h{idx}'; vns=f'sd-ns{idx}'
     r = _run(['sudo','-n','ip','netns','list'], capture=True)
     if ns in r.stdout: return
+    # Pre-cleanup stale interfaces from previous crashed session
+    _sudo('ip','link','del',vh, capture=True)
+    _sudo('ip','netns','del',ns, capture=True)
     for cmd in [
         ['ip','netns','add',ns],
         ['ip','link','add',vh,'type','veth','peer','name',vns],
@@ -898,6 +1000,8 @@ def netns_setup(mnt: Path=None):
         ['ip','addr','add',f'{subnet}.254/24','dev',vh],
         ['ip','link','set',vh,'up'],
     ]: _sudo(*cmd)
+    # Enable ip_forward inside namespace (§2.12)
+    _sudo('ip','netns','exec',ns,'sysctl','-qw','net.ipv4.ip_forward=1', capture=True)
 
 def netns_ct_add(cid: str, name: str, mnt: Path=None):
     mnt = mnt or G.mnt_dir; ns=netns_name(mnt); idx=netns_idx(mnt)
@@ -930,6 +1034,10 @@ def netns_teardown(mnt: Path=None):
     ns = netns_name(mnt); idx = netns_idx(mnt)
     _sudo('ip','link','del',f'sd-h{idx}')
     _sudo('ip','netns','del',ns)
+    # Clean up metadata files — matches shell _netns_teardown exactly
+    for fname in ('.netns_name', '.netns_idx', '.netns_hosts'):
+        try: (mnt/'.sd'/fname).unlink(missing_ok=True)
+        except: pass
 
 def exposure_file(cid: str) -> Path: return G.containers_dir/cid/'exposure'
 def exposure_get(cid: str) -> str:
@@ -1088,51 +1196,78 @@ def bp_template() -> str:
 [container]
 
 [meta]
-name         = my-service
-version      = 1.0.0
-dialogue     = Short label shown in the container list
-description  = Longer notes about this service.
-port         = 8080
+name = my-service
+version = 1.0.0
+dialogue = Short label shown in the container list
+description = Longer notes about this service.
+port = 8080
 storage_type = my-service
-entrypoint   = bin/my-service --port 8080
-# log        = logs/service.log
-# health     = true
-# gpu        = nvidia
-# cap_drop   = true
-# seccomp    = true
+entrypoint = bin/my-service --port 8080
+# log = logs/service.log # log file shown in View log (default: start.log)
+# health = [true | false] # enable health check ping on port
+# gpu = [nvidia | amd] # pass GPU into container
+# cap_drop = [true | false] # drop Linux capabilities (default: true)
+# seccomp = [true | false] # apply seccomp profile (default: true)
 
 [env]
-PORT     = 8080
-HOST     = 127.0.0.1
+PORT = 8080
+HOST = 127.0.0.1
 DATA_DIR = data
+# API_KEY = secret
 
 [storage]
+# Paths inside CONTAINER_ROOT that persist across reinstalls
 data, logs
 
 [deps]
+# apt packages installed into the container chroot
 curl, tar
 
 [dirs]
+# Directories created automatically inside CONTAINER_ROOT
+# Supports nested: lib(subdir1, subdir2)
 bin, data, logs
 
 [pip]
+# Python packages installed into CONTAINER_ROOT/venv
+# Supports version pins: requests==2.31.0 or bare: requests
 
 [npm]
+# Node packages installed into CONTAINER_ROOT/node_modules
+# e.g. express, lodash
 
 [git]
+# org/repo → auto-detect archive/binary, extract to CONTAINER_ROOT
+# org/repo [asset-name.tar.zst] → match exact release asset filename, then extract
+# org/repo [asset-name][TYPE] → match asset and filter by type before selecting
+# org/repo → subdir/ → extract to subdir
+# org/repo source → git clone to src/
+# TYPE tokens: [BIN] raw binary [ZIP] .zip [TAR] .tar.gz/.tar.zst/etc (default: auto/ZIP)
 
 [build]
+# Compile steps — run once during install, after git source clone
+# cd src && make
 
 [install]
+# Extra setup steps run once after deps/dirs/git
 
 [update]
+# Steps run when manually triggering Update from the container menu
 
 [start]
+# Script run to start the container (runs inside namespace+chroot)
+# $CONTAINER_ROOT is always available and points to the install path
 
 [cron]
-# 5m [heartbeat] | printf '[cron] ping\\n' >> logs/cron.log
+# interval [name] [--sudo] [--unjailed] | command
+# interval: [N][s|m|h] e.g. 30s, 5m, 1h
+# --unjailed: run on host instead of inside container
+# --sudo: wrap command with sudo
+# 5m [heartbeat] | printf '[cron] ping\n' >> logs/cron.log
 
 [actions]
+# One action per line: Label | [prompt: "text" |] [select: cmd [--skip-header] [--col N] |] cmd [{input}|{selection}]
+# ⊙ auto-prepended if label starts with a plain letter
 Show logs | tail -f logs/service.log
 
 [/container]
@@ -1172,13 +1307,22 @@ def start_ct(cid: str, mode='background', profile_cid: str=''):
     if not start_sh or not start_sh.exists():
         build_start_script(cid)
     sess = tsess(cid)
-    _tmux('new-session','-d','-s',sess,f'bash {start_sh}')
+    lf = log_path(cid, 'start')
+    if G.logs_dir:
+        G.logs_dir.mkdir(parents=True, exist_ok=True)
+    log_write(cid, 'start', f'── started {time.strftime("%Y-%m-%d %H:%M:%S")} ──')
+    _tmux('new-session','-d','-s',sess,
+          f'bash -o pipefail {start_sh!s} 2>&1 | tee -a {str(lf)!r}')
     _tmux('set-option','-t',sess,'detach-on-destroy','off')
     # start cron jobs
     d=sj(cid)
     for i,cr in enumerate(d.get('crons',[])):
         _cron_start_one(cid,i,cr)
-    if mode=='attach': _tmux('switch-client','-t',sess)
+    if mode=='attach':
+        if os.environ.get('TMUX'):
+            _tmux('new-window', '-t', 'simpleDocker', f'tmux attach-session -t {sess}')
+        else:
+            _tmux('switch-client','-t',sess)
 
 def stop_ct(cid: str):
     sess=tsess(cid)
@@ -1222,7 +1366,7 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
             f.write(f'    printf "\\n\\033[1m── Cron: {name} ──\\033[0m\\n"\n')
             inner=cmd.replace('$CONTAINER_ROOT','/mnt')
             f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash -s << \'_SDCRON\'\n')
-            f.write(f'_cb(){{ sudo -n chroot "$1" bash "${{@:2}}"; }}\n')
+            f.write(f'_cb(){{ local r=$1; shift; local b=/bin/bash; [[ ! -f "$r/bin/bash" && ! -L "$r/bin/bash" && -f "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "${{@}}"; }}\n')
             f.write(f'mount --bind {ip} {ub}/mnt 2>/dev/null||true\n')
             f.write(f'_cb {ub} -c "cd /mnt && {inner}"\n')
             f.write('_SDCRON\n')
@@ -1230,6 +1374,14 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
     os.chmod(runner.name, 0o755)
     _tmux('new-session','-d','-s',sname,f'bash {runner.name}; rm -f {runner.name}')
     _tmux('set-option','-t',sname,'detach-on-destroy','off')
+
+def _cr_prefix(val: str) -> str:
+    """Prefix relative paths with $CONTAINER_ROOT — matches shell _cr_prefix exactly.
+    A value is relative if it doesn't start with /, $, ~, or a variable reference."""
+    if not val: return val
+    if val.startswith(('/', '$', '~', '"', "'")): return val
+    # Looks like a relative path (no leading slash/sigil)
+    return f'$CONTAINER_ROOT/{val}'
 
 def _env_exports(cid: str, install_path: Path) -> str:
     d=sj(cid); lines=[f'export CONTAINER_ROOT={install_path!r}']
@@ -1241,7 +1393,7 @@ def _env_exports(cid: str, install_path: Path) -> str:
             'export PATH="$CONTAINER_ROOT/venv/bin:$CONTAINER_ROOT/bin:$PATH"',
             'export PYTHONNOUSERSITE=1 PIP_USER=false']
     for k,v in d.get('environment',{}).items():
-        lines.append(f'export {k}="{v}"')
+        lines.append(f'export {k}="{_cr_prefix(str(v))}"')
     return '\n'.join(lines)+'\n'
 
 def build_start_script(cid: str):
@@ -1250,7 +1402,7 @@ def build_start_script(cid: str):
     if not ip: return
     d=sj(cid); ns=netns_name()
     start_block=d.get('start',''); ep=d.get('meta',{}).get('entrypoint','')
-    exec_cmd=ep if ep else start_block
+    exec_cmd=_cr_prefix(ep) if ep else start_block
     hostname=re.sub(r'[^a-z0-9\-]','-',cname(cid).lower())[:63]
     sh=ip/'start.sh'
     with open(sh,'w') as f:
@@ -1258,7 +1410,7 @@ def build_start_script(cid: str):
         f.write(_env_exports(cid,ip))
         f.write(f'sudo -n nsenter --net=/run/netns/{ns} -- '
                 f'unshare --mount --pid --uts --ipc --fork bash -s << \'_SDNS_WRAP\'\n')
-        f.write('_chroot_bash(){ local r=$1; shift; sudo -n chroot "$r" bash "$@"; }\n')
+        f.write('_chroot_bash(){ local r=$1; shift; local b=/bin/bash; [[ ! -f "$r/bin/bash" && ! -L "$r/bin/bash" && -f "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }\n')
         f.write(f'printf "%s" {hostname!r} > /proc/sys/kernel/hostname 2>/dev/null||true\n')
         f.write(f'mount -t proc proc {ip}/proc 2>/dev/null||true\n')
         f.write(f'mount --bind /sys  {ip}/sys  2>/dev/null||true\n')
@@ -1278,7 +1430,9 @@ def _gen_install_script(cid: str, mode: str) -> str:
     lines+=[f'_ok={ok_f!r}', f'_fail={fail_f!r}',
             '_finish(){ local c=$?; [[ $c -eq 0 ]] && touch "$_ok" || touch "$_fail"; }',
             'trap _finish EXIT', f'trap \'touch "$_fail"; exit 130\' INT TERM',
-            '_chroot_bash(){ local r=$1; shift; sudo -n chroot "$r" bash "$@"; }',
+            '_chroot_bash(){ local r=$1; shift; local b=/bin/bash; '
+            '[[ ! -f "$r/bin/bash" && ! -L "$r/bin/bash" && -f "$r/usr/bin/bash" ]] && b=/usr/bin/bash; '
+            'sudo -n chroot "$r" "$b" "$@"; }',
             f'_SD_INSTALL={ip!r}', f'_UB={ub!r}',
             '_mnt(){ sudo -n mount --bind /proc "$_UB/proc"; sudo -n mount --bind /sys "$_UB/sys"; sudo -n mount --bind /dev "$_UB/dev"; }',
             '_umnt(){ sudo -n umount -lf "$_UB/dev" "$_UB/sys" "$_UB/proc" 2>/dev/null||true; }',
@@ -1396,7 +1550,7 @@ def _gen_install_script(cid: str, mode: str) -> str:
                 script,
                 '_SD_RUN_EOF',
                 'chmod +x "$_sd_run"',
-                f'sudo -n chroot {ip!r} bash /tmp/$(basename "$_sd_run")',
+                f'_chroot_bash {ip!r} bash /tmp/$(basename "$_sd_run")',
                 f'sudo -n umount -lf {ip!r}/dev {ip!r}/sys {ip!r}/proc 2>/dev/null||true',
                 'rm -f "$_sd_run"','']
     return '\n'.join(lines)
@@ -1408,7 +1562,7 @@ def write_pkg_manifest(cid: str):
     (G.containers_dir/cid/'pkg_manifest.json').write_text(json.dumps(m,indent=2))
 
 def run_job(cid: str, mode='install', force=False):
-    """Launch install/update in a tmux session."""
+    """Launch install/update in a tmux session, capturing output to Logs/."""
     compile_service(cid)
     ip=cpath(cid)
     if not ip: pause('No install path set.'); return
@@ -1420,8 +1574,14 @@ def run_job(cid: str, mode='install', force=False):
     runner.write(script_content); runner.close(); os.chmod(runner.name,0o755)
     sess=inst_sess(cid)
     if tmux_up(sess): _tmux('kill-session','-t',sess)
+    # Capture output to the Logs directory
+    lf = log_path(cid, mode)
+    if G.logs_dir:
+        G.logs_dir.mkdir(parents=True, exist_ok=True)
+    log_write(cid, mode,
+              f'── {mode} started {time.strftime("%Y-%m-%d %H:%M:%S")} ──')
     _tmux('new-session','-d','-s',sess,
-          f'bash {runner.name!r}; rm -f {runner.name!r}; '
+          f'bash -o pipefail {runner.name!r} 2>&1 | tee -a {str(lf)!r}; rm -f {runner.name!r}; '
           f'tmux kill-session -t {sess} 2>/dev/null||true')
     _tmux('set-option','-t',sess,'detach-on-destroy','off')
 
@@ -1561,53 +1721,84 @@ def _ubuntu_pkg_op(sess: str, title: str, apt_cmd: str):
     ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
     runner=tempfile.NamedTemporaryFile(mode='w',dir=str(G.tmp_dir),
                                        suffix='.sh',delete=False,prefix='.sd_ubpkg_')
-    runner.write(f'#!/bin/bash\nset -e\n'
-                 f'_cb(){{ sudo -n chroot "$1" bash "${{@:2}}"; }}\n'
-                 f'sudo -n mount --bind /proc {G.ubuntu_dir}/proc; '
-                 f'sudo -n mount --bind /sys {G.ubuntu_dir}/sys; '
-                 f'sudo -n mount --bind /dev {G.ubuntu_dir}/dev\n'
-                 f'_sd_apt=$(mktemp /tmp/.sd_apt_XXXXXX.sh)\n'
-                 f'printf \'#!/bin/sh\\nset -e\\n{apt_cmd}\\n\' > "$_sd_apt"\n'
-                 f'chmod +x "$_sd_apt"\n'
-                 f'sudo -n mount --bind "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||cp "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh\n'
-                 f'_cb {G.ubuntu_dir!r} /tmp/.sd_apt.sh\n'
-                 f'sudo -n umount -lf {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||true\n'
-                 f'sudo -n umount -lf {G.ubuntu_dir}/dev {G.ubuntu_dir}/sys {G.ubuntu_dir}/proc 2>/dev/null||true\n'
-                 f'rm -f "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||true\n'
-                 f'touch {ok_f!r}\n'
-                 f'tmux kill-session -t {sess} 2>/dev/null||true\n')
+    runner.write(
+        f'#!/bin/bash\nset -e\n'
+        f'_chroot_bash(){{ local r=$1; shift; local b=/bin/bash; [[ ! -f "$r/bin/bash" && ! -L "$r/bin/bash" && -f "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }}\n'
+        f'_cleanup(){{ local rc=$?; sudo -n umount -lf {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||true;'
+        f' sudo -n umount -lf {G.ubuntu_dir}/dev {G.ubuntu_dir}/sys {G.ubuntu_dir}/proc 2>/dev/null||true;'
+        f' [[ $rc -ne 0 ]] && touch {fail_f!r} || true; tmux kill-session -t {sess} 2>/dev/null||true; }}\n'
+        f'trap _cleanup EXIT\n'
+        f'sudo -n mount --bind /proc {G.ubuntu_dir}/proc\n'
+        f'sudo -n mount --bind /sys {G.ubuntu_dir}/sys\n'
+        f'sudo -n mount --bind /dev {G.ubuntu_dir}/dev\n'
+        f'_sd_apt=$(mktemp /tmp/.sd_apt_XXXXXX.sh)\n'
+        f'printf \'#!/bin/sh\\nset -e\\n{apt_cmd}\\n\' > "$_sd_apt"\n'
+        f'chmod +x "$_sd_apt"\n'
+        f'sudo -n mount --bind "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||'
+        f'cp "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh\n'
+        f'_chroot_bash {G.ubuntu_dir!r} bash /tmp/.sd_apt.sh\n'
+        f'sudo -n umount -lf {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||true\n'
+        f'rm -f "$_sd_apt" {G.ubuntu_dir}/tmp/.sd_apt.sh 2>/dev/null||true\n'
+        f'touch {ok_f!r}\n'
+    )
     runner.close(); os.chmod(runner.name,0o755)
     if tmux_up(sess): _tmux('kill-session','-t',sess)
     _tmux('new-session','-d','-s',sess,f'bash {runner.name!r}; rm -f {runner.name!r}')
     _tmux('set-option','-t',sess,'detach-on-destroy','off')
-    # wait with fzf "attach" option
     _installing_wait_loop(sess, str(ok_f), str(fail_f), title)
     G.ub_cache_loaded=False
+    if fail_f.exists():
+        pause(f'✗ {title} failed. Select "Attach" to see output.')
+    ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
 
 def _installing_wait_loop(sess: str, ok_f: str, fail_f: str, title: str):
-    """Show fzf menu with attach option; auto-close when done."""
-    items=[f'{DIM}→  Attach to {title}{NC}', _nav_sep(), _back_item()]
+    """Show fzf menu with attach option; auto-close when session ends or ok/fail file appears.
+    Uses a tmp sentinel file when ok_f/fail_f are /dev/null (e.g. Caddy install)."""
+    # If caller passed /dev/null we can't use it as a sentinel — watch for session exit instead
+    use_sess_exit = (ok_f == '/dev/null' and fail_f == '/dev/null')
+
+    items = [f'{DIM}→  Attach to {title}{NC}', _nav_sep(), _back_item()]
     while True:
-        done_evt=threading.Event()
-        def _watch():
-            while not Path(ok_f).exists() and not Path(fail_f).exists(): time.sleep(0.3)
-            done_evt.set()
-        wt=threading.Thread(target=_watch,daemon=True); wt.start()
-        proc=subprocess.Popen(['fzf']+FZF_BASE+[f'--header={BLD}── {title} ──{NC}'],
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        G.active_fzf_pid=proc.pid
+        done_evt = threading.Event()
+
+        def _watch(evt=done_evt):
+            if use_sess_exit:
+                # Poll until tmux session disappears
+                while tmux_up(sess): time.sleep(0.3)
+                evt.set()
+            else:
+                while not Path(ok_f).exists() and not Path(fail_f).exists():
+                    if not tmux_up(sess): break   # session died unexpectedly
+                    time.sleep(0.3)
+                evt.set()
+
+        wt = threading.Thread(target=_watch, daemon=True); wt.start()
+        proc = subprocess.Popen(
+            ['fzf'] + FZF_BASE + [f'--header={BLD}── {title} ──{NC}'],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        G.active_fzf_pid = proc.pid
         proc.stdin.write(('\n'.join(items)+'\n').encode()); proc.stdin.close()
-        def _kill_when_done():
-            done_evt.wait(); proc.kill()
-        kt=threading.Thread(target=_kill_when_done,daemon=True); kt.start()
-        out,_=proc.communicate()
-        G.active_fzf_pid=None
-        if done_evt.is_set(): return   # auto-advanced
-        sel=out.decode().strip()
-        if not sel or clean(sel)==L['back']:
+
+        def _kill_when_done(p=proc, evt=done_evt):
+            evt.wait()
+            try: p.kill()
+            except: pass
+        kt = threading.Thread(target=_kill_when_done, daemon=True); kt.start()
+
+        out, _ = proc.communicate()
+        G.active_fzf_pid = None
+        if done_evt.is_set(): return   # auto-advanced when install finished
+
+        sel = out.decode().strip()
+        if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
-        if 'Attach' in sel and tmux_up(sess): _tmux('switch-client','-t',sess)
+        if 'Attach' in sel and tmux_up(sess):
+            if os.environ.get('TMUX'):
+                _tmux('new-window', '-t', 'simpleDocker', f'tmux attach-session -t {sess}')
+            else:
+                _tmux('switch-client', '-t', sess)
+            continue  # stay in wait loop — user may detach and come back
 
 # ══════════════════════════════════════════════════════════════════════════════
 # services/caddy.py — reverse proxy
@@ -1615,170 +1806,377 @@ def _installing_wait_loop(sess: str, ok_f: str, fail_f: str, title: str):
 
 def _proxy_pidfile() -> Path: return G.mnt_dir/'.sd/.caddy.pid'
 def _proxy_caddyfile() -> Path: return G.mnt_dir/'.sd/Caddyfile'
-def proxy_running() -> bool:
-    pf=_proxy_pidfile()
-    if not pf.exists(): return False
-    try: os.kill(int(pf.read_text().strip()),0); return True
-    except: return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/encryption.py — LUKS key management menu
 # ══════════════════════════════════════════════════════════════════════════════
 
 def enc_menu():
+    """Full encryption management menu. Matches .sh _enc_menu exactly."""
     while True:
-        auto=enc_auto_unlock_enabled(); agnostic=enc_system_agnostic_enabled()
-        auto_lbl=f'{GRN}Enabled{NC}' if auto else f'{RED}Disabled{NC}'
-        ag_lbl=f'{GRN}Enabled{NC}' if agnostic else f'{RED}Disabled{NC}'
-        vdir=enc_verified_dir(); vid=enc_verified_id()
-        slots_used=enc_slots_used(); slots_total=SD_LUKS_SLOT_MAX-SD_LUKS_SLOT_MIN+1
-        vs_ids=([f.stem for f in vdir.glob('*') if f.is_file()] if vdir.is_dir() else [])
-        # Passkeys: slots 7-31 not used by verified systems or auth token
-        r=_sudo('cryptsetup','luksDump',str(G.img_path),capture=True)
-        auth_slot=enc_authkey_slot()
-        vs_slots={snap_meta_get(vdir,vsid,'slot') for vsid in vs_ids if snap_meta_get(vdir,vsid,'slot')}
-        pk_slots=[m.group(1) for m in re.finditer(r'^\s+(\d+): luks2',r.stdout,re.M)
-                  if m.group(1)!='0' and m.group(1)!=auth_slot and m.group(1) not in vs_slots
-                  and SD_LUKS_SLOT_MIN<=int(m.group(1))<=SD_LUKS_SLOT_MAX]
-        nf=G.mnt_dir/'.sd/keyslot_names.json'
-        try: slot_names=json.loads(nf.read_text()) if nf.exists() else {}
-        except: slot_names={}
-        items=[_sep('General'),
-               f' {DIM}◈  System Agnostic: {ag_lbl}{NC}',
-               f' {DIM}◈  Auto-Unlock: {auto_lbl}{NC}',
-               f' {DIM}◈  Reset Auth Token{NC}',
-               _sep('Verified Systems')]
+        if not G.img_path or not G.mnt_dir: return
+        os.system('clear')
+        auto    = enc_auto_unlock_enabled()
+        agnostic= enc_system_agnostic_enabled()
+        auto_lbl= f'{GRN}Enabled{NC}' if auto else f'{RED}Disabled{NC}'
+        ag_lbl  = f'{GRN}Enabled{NC}' if agnostic else f'{RED}Disabled{NC}'
+        vdir    = enc_verified_dir()
+        vid     = enc_verified_id()
+        slots_used  = enc_slots_used()
+        slots_total = SD_LUKS_SLOT_MAX - SD_LUKS_SLOT_MIN + 1
+        auth_slot   = enc_authkey_slot()
+
+        # Collect verified system IDs from cache dir
+        vs_ids = ([f.name for f in vdir.iterdir() if f.is_file()] if vdir.is_dir() else [])
+
+        # Build set of slots occupied by verified systems (using enc_vs_slot, NOT snap_meta_get)
+        vs_slot_set = set()
         for vsid in vs_ids:
-            host=vdir.joinpath(vsid).read_text().splitlines()[0] if vdir.joinpath(vsid).exists() else vsid
+            sl = enc_vs_slot(vsid)
+            if sl and sl != '0': vs_slot_set.add(sl)
+
+        # Passkeys: active slots in user range not used by vs or auth
+        r = _sudo('cryptsetup','luksDump',str(G.img_path), capture=True)
+        pk_slots = []
+        for m in re.finditer(r'^\s+(\d+): luks2', r.stdout, re.M):
+            sl = m.group(1)
+            if sl == '0': continue
+            if sl == auth_slot: continue
+            if sl == '1': continue          # slot 1 = default keyword
+            if sl in vs_slot_set: continue
+            if not (SD_LUKS_SLOT_MIN <= int(sl) <= SD_LUKS_SLOT_MAX): continue
+            pk_slots.append(sl)
+
+        nf = G.mnt_dir/'.sd/keyslot_names.json'
+        try: slot_names = json.loads(nf.read_text()) if nf.exists() else {}
+        except: slot_names = {}
+
+        items = [
+            _sep('General'),
+            f' {DIM}◈  System Agnostic: {ag_lbl}{NC}',
+            f' {DIM}◈  Auto-Unlock: {auto_lbl}{NC}',
+            f' {DIM}◈  Reset Auth Token{NC}',
+            _sep('Verified Systems'),
+        ]
+        for vsid in vs_ids:
+            host = enc_vs_hostname(vsid)
             items.append(f' {DIM}◈  {host}  [vs:{vsid}]{NC}')
         items.append(f' {GRN}+  Verify this system{NC}')
         items.append(_sep('Passkeys'))
-        if not pk_slots: items.append(f'{DIM}  (no passkeys added yet){NC}')
+        if not pk_slots:
+            items.append(f'{DIM}  (no passkeys added yet){NC}')
         for sl in pk_slots:
-            nm=slot_names.get(sl,f'Key {sl}')
+            nm = slot_names.get(sl, f'Key {sl}')
             items.append(f' {DIM}◈  {nm}  [s:{sl}]{NC}')
         items.append(f' {GRN}+  Add Key{NC}')
-        items+=[_nav_sep(),_back_item()]
-        sel=fzf_run(items,header=f'{BLD}── Manage Encryption ──{NC}  {DIM}{slots_used}/{slots_total} slots{NC}')
+        items += [_nav_sep(), _back_item()]
+
+        sel = fzf_run(items, header=f'{BLD}── Manage Encryption ──{NC}  {DIM}{slots_used}/{slots_total} slots{NC}')
         if sel is None:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
-        sc=clean(sel)
-        if sc==L['back'] or not sc: return
+        sc = clean(sel)
+        if sc == L['back'] or not sc: return
+
+        # ── System Agnostic toggle (slot 1 = SD_DEFAULT_KEYWORD) ────────────
         if 'System Agnostic' in sc:
             if agnostic:
-                if not pk_slots and not [v for v in vs_ids if snap_meta_get(vdir,v,'slot')]:
+                # Lockout check: need at least one other method
+                active_vs = sum(1 for vsid in vs_ids if enc_vs_slot(vsid) not in ('','0'))
+                if not pk_slots and active_vs == 0:
                     pause('Cannot disable — no other unlock method exists.\nAdd a passkey or verify a system first.'); continue
-                if not confirm('Disable System Agnostic? This image will no longer open on unknown machines.'): continue
-                subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
-                                '--key-file=-',str(G.img_path),'1'],
-                               input=SD_DEFAULT_KEYWORD.encode(), capture_output=True)
-                pause('System Agnostic disabled.')
+                if not confirm('Disable System Agnostic?\nThis image will no longer open on unknown machines.'): continue
+                # Auth with auth key if valid, else prompt
+                # Shell fallback: if auth.key invalid, use SD_DEFAULT_KEYWORD (the key in slot 1)
+                # as authorisation — the image was opened via that key, so it must be valid.
+                # Python previously prompted the user, which diverges from .sh behaviour.
+                if enc_authkey_valid():
+                    rc = subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                                         '--key-file',str(enc_authkey_path()),str(G.img_path),'1'],
+                                        capture_output=True).returncode
+                else:
+                    import tempfile as _tf2
+                    _dk_f = _tf2.mktemp(dir=str(G.tmp_dir))
+                    try:
+                        open(_dk_f,'w').write(SD_DEFAULT_KEYWORD)
+                        rc = subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                                             '--key-file',_dk_f,str(G.img_path),'1'],
+                                            capture_output=True).returncode
+                    finally:
+                        try: Path(_dk_f).unlink(missing_ok=True)
+                        except: pass
+                pause('System Agnostic disabled.' if rc==0 else 'Failed.')
             else:
                 if not enc_authkey_valid(): pause('Auth keyfile missing. Use Reset Auth Token first.'); continue
-                subprocess.run(['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
-                                '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
-                                '--key-slot','1','--key-file',str(enc_authkey_path()),str(G.img_path)],
-                               input=SD_DEFAULT_KEYWORD.encode(), capture_output=True)
-                pause('System Agnostic enabled.')
+                rc = subprocess.run(
+                    ['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
+                     '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
+                     '--key-slot','1','--key-file',str(enc_authkey_path()),str(G.img_path)],
+                    input=SD_DEFAULT_KEYWORD.encode(), capture_output=True).returncode
+                pause('System Agnostic enabled.' if rc==0 else 'Failed.')
+
+        # ── Auto-Unlock toggle (verified system slots) ───────────────────────
         elif 'Auto-Unlock' in sc:
             if auto:
-                if confirm('Disable Auto-Unlock? All verified system slots will be removed (cache kept).'):
-                    for vsid in vs_ids:
-                        sl=snap_meta_get(vdir,vsid,'slot')
-                        if sl and sl!='0':
-                            subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
-                                            '--key-file=-',str(G.img_path),sl],
-                                           input=G.verification_cipher.encode(), capture_output=True)
-                            lns=vdir.joinpath(vsid).read_text().splitlines()
-                            lns[1]='' if len(lns)>1 else ''
-                            vdir.joinpath(vsid).write_text('\n'.join(lns))
-                    pause('Auto-Unlock disabled.')
+                if not confirm('Disable Auto-Unlock? All verified system LUKS slots will be removed (cache kept).'): continue
+                if not enc_authkey_valid(): pause('Auth keyfile missing.'); continue
+                ok = True
+                for vsid in vs_ids:
+                    sl = enc_vs_slot(vsid)
+                    if not sl or sl == '0': continue
+                    rc = subprocess.run(
+                        ['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                         '--key-file',str(enc_authkey_path()),str(G.img_path),sl],
+                        capture_output=True).returncode
+                    if rc != 0: ok = False
+                    # Clear slot in cache file but keep hostname and pass for re-enable
+                    lines = (vdir/vsid).read_text().splitlines()
+                    while len(lines) < 3: lines.append('')
+                    lines[1] = ''   # clear slot number
+                    (vdir/vsid).write_text('\n'.join(lines))
+                pause('Auto-Unlock disabled.' if ok else 'Partially failed.')
             else:
                 if not enc_authkey_valid(): pause('Auth keyfile missing. Use Reset Auth first.'); continue
+                ok = True; count = 0
                 for vsid in vs_ids:
-                    vspass=snap_meta_get(vdir,vsid,'pass')
+                    vspass = enc_vs_pass(vsid)
                     if not vspass: continue
-                    free=enc_free_slot()
-                    if not free: pause('No free slots.'); break
-                    subprocess.run(['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
-                                    '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
-                                    '--key-slot',free,'--key-file',str(enc_authkey_path()),str(G.img_path)],
-                                   input=vspass.encode(), capture_output=True)
-                    snap_meta_set(vdir,vsid,slot=free)
-                pause('Auto-Unlock enabled.')
+                    free = enc_free_slot()
+                    if not free: pause('No free slots.'); ok = False; break
+                    rc = subprocess.run(
+                        ['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
+                         '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
+                         '--key-slot',free,'--key-file',str(enc_authkey_path()),str(G.img_path)],
+                        input=vspass.encode(), capture_output=True).returncode
+                    if rc == 0:
+                        enc_vs_write(vsid, free); count += 1
+                    else: ok = False
+                if ok: pause(f'Auto-Unlock enabled ({count} system(s) restored).')
+                else: pause('Partially failed.')
+
+        # ── Reset Auth Token ─────────────────────────────────────────────────
         elif 'Reset Auth Token' in sc:
-            import getpass
-            pw=getpass.getpass('  Current passphrase: ')
-            kf=enc_authkey_path(); kf.parent.mkdir(parents=True,exist_ok=True)
-            kf.write_bytes(os.urandom(64)); kf.chmod(0o600)
-            tf=tempfile.mktemp(dir=str(G.tmp_dir))
-            Path(tf).write_bytes(pw.encode())
-            r=subprocess.run(['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
-                              '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
-                              '--key-slot','0','--key-file',tf,str(G.img_path),str(kf)],
-                             capture_output=True)
-            Path(tf).unlink(missing_ok=True)
-            if r.returncode==0: enc_authkey_slot_file().write_text('0'); pause('Auth token reset.')
-            else: pause('Failed — wrong passphrase?')
+            pw = finput('Any existing passphrase to authorise reset:')
+            if not pw: continue
+            os.system('clear')
+            print(f'\n  {BLD}── Reset Auth Token ──{NC}\n  {DIM}Generating new keyfile…{NC}\n')
+            # Kill old slot 0 first — but only if auth.key file exists AND is
+            # currently a valid key (--test-passphrase). Matches shell:
+            #   [[ -f "$_old_kf" ]] && sudo cryptsetup open --test-passphrase --key-file "$_old_kf" ...
+            old_kf = enc_authkey_path()
+            if old_kf.exists():
+                _test = subprocess.run(
+                    ['sudo','-n','cryptsetup','open','--test-passphrase',
+                     '--key-file',str(old_kf),str(G.img_path)],
+                    capture_output=True)
+                if _test.returncode == 0:
+                    # Auth.key is valid — use the user-provided passphrase to authorise kill
+                    subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                                    '--key-file=-',str(G.img_path),'0'],
+                                   input=pw.encode(), capture_output=True)
+                old_kf.unlink(missing_ok=True)
+            # Create new auth key using the provided passphrase as authorisation
+            tf = Path(tempfile.mktemp(dir=str(G.tmp_dir)))
+            tf.write_bytes(pw.encode())
+            try:
+                ok = enc_authkey_create(tf)
+            finally:
+                tf.unlink(missing_ok=True)
+            os.system('clear')
+            pause('Auth token reset successfully.' if ok else 'Failed — wrong passphrase?')
+
+        # ── Verify this system ───────────────────────────────────────────────
         elif 'Verify this system' in sc:
-            free=enc_free_slot()
-            if not free: pause(f'No free slots ({SD_LUKS_SLOT_MIN}–{SD_LUKS_SLOT_MAX} full).'); continue
+            if enc_verified_id() in vs_ids:
+                sl = enc_vs_slot(enc_verified_id())
+                if sl and sl != '0':
+                    pause(f'Already verified on this machine (slot {sl}).'); continue
             if not enc_authkey_valid(): pause('Auth keyfile missing. Use Reset Auth Token first.'); continue
-            vspass=enc_verified_pass()
-            r=subprocess.run(['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
-                              '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
-                              '--key-slot',free,'--key-file',str(enc_authkey_path()),str(G.img_path)],
-                             input=vspass.encode(), capture_output=True)
-            if r.returncode==0:
-                vid2=enc_verified_id(); vdir.mkdir(parents=True,exist_ok=True)
-                hostname=open('/etc/hostname').read().strip() if Path('/etc/hostname').exists() else 'unknown'
-                vdir.joinpath(vid2).write_text(f'{hostname}\n{free}\n{vspass}')
-                pause('This system verified for auto-unlock.')
-            else: pause('Failed.')
+            if auto:
+                free = enc_free_slot()
+                if not free: pause(f'No free slots ({SD_LUKS_SLOT_MIN}–{SD_LUKS_SLOT_MAX} full).'); continue
+                vspass = enc_verified_pass()
+                rc = subprocess.run(
+                    ['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
+                     '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
+                     '--key-slot',free,'--key-file',str(enc_authkey_path()),str(G.img_path)],
+                    input=vspass.encode(), capture_output=True).returncode
+                if rc == 0:
+                    enc_vs_write(enc_verified_id(), free)
+                    pause(f'This machine verified for auto-unlock (slot {free}).')
+                else:
+                    pause('Failed to add LUKS slot.')
+            else:
+                # Auto-unlock off — just cache the entry (slot empty)
+                enc_vs_write(enc_verified_id(), '')
+                pause('Machine cached. Enable Auto-Unlock to activate it.')
+
+        # ── Add passkey ──────────────────────────────────────────────────────
         elif '+ Add Key' in sc:
-            kname=finput('Key name:')
-            if not kname: continue
-            import getpass; pw=getpass.getpass('  Passphrase: '); pw2=getpass.getpass('  Confirm: ')
-            if pw!=pw2: pause('Passphrases do not match.'); continue
             if not enc_authkey_valid(): pause('Auth keyfile missing.'); continue
-            free=enc_free_slot()
-            if not free: pause('No free slots.'); continue
-            r=subprocess.run(['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
-                              '--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1',
-                              '--key-slot',free,'--key-file',str(enc_authkey_path()),str(G.img_path)],
-                             input=pw.encode(), capture_output=True)
-            if r.returncode==0:
-                nf.parent.mkdir(parents=True,exist_ok=True)
-                try: names=json.loads(nf.read_text()) if nf.exists() else {}
-                except: names={}
-                names[free]=kname; nf.write_text(json.dumps(names,indent=2))
+            free = enc_free_slot()
+            if not free: pause(f'No free slots ({SD_LUKS_SLOT_MIN}–{SD_LUKS_SLOT_MAX} full).'); continue
+            # Parameter editor — matches .sh exactly
+            import random as _random, string as _string
+            kname   = ''.join(_random.choices(_string.ascii_lowercase+_string.digits, k=8))
+            pbkdf   = 'argon2id'; ram = '262144'; threads = '4'; iter_ms = '1000'
+            cipher  = 'aes-xts-plain64'; keybits = '512'; khash = 'sha256'; sector = '512'
+            param_done = False
+            while not param_done:
+                param_items = [
+                    _sep('Parameters'),
+                    f'  {"name":<10}{CYN}{kname}{NC}',
+                    f'  {"pbkdf":<10}{CYN}{pbkdf}{NC}',
+                    f'  {"ram":<10}{CYN}{ram} KiB{NC}',
+                    f'  {"threads":<10}{CYN}{threads}{NC}',
+                    f'  {"iter-ms":<10}{CYN}{iter_ms}{NC}',
+                    f'  {"cipher":<10}{CYN}{cipher}{NC}',
+                    f'  {"key-bits":<10}{CYN}{keybits}{NC}',
+                    f'  {"hash":<10}{CYN}{khash}{NC}',
+                    f'  {"sector":<10}{CYN}{sector}{NC}',
+                    _sep('Navigation'),
+                    f'{GRN}▷  Continue{NC}',
+                    f'{RED}×  Cancel{NC}',
+                ]
+                psel = fzf_run(param_items,
+                    header=f'{BLD}── Encryption parameters ──{NC}\n{DIM}  Select a param to change it.{NC}')
+                if not psel: break
+                psc = clean(psel)
+                if '▷' in psc or 'Continue' in psc: param_done = True
+                elif '×' in psc or 'Cancel' in psc: break
+                elif 'name' in psc:
+                    v = finput(f'Key name (blank = {kname}):')
+                    if v is not None: kname = v.strip() or kname
+                elif 'pbkdf' in psc:
+                    v = fzf_run(['argon2id','argon2i','pbkdf2'],
+                                header=f'{BLD}── pbkdf ──{NC}')
+                    if v: pbkdf = clean(v)
+                elif 'ram' in psc:
+                    v = finput('RAM in KiB (e.g. 262144 = 256 MB):')
+                    if v and v.strip().isdigit(): ram = v.strip()
+                elif 'threads' in psc:
+                    v = finput('Threads (e.g. 4):')
+                    if v and v.strip().isdigit(): threads = v.strip()
+                elif 'iter-ms' in psc:
+                    v = finput('Iteration time in ms (e.g. 1000):')
+                    if v and v.strip().isdigit(): iter_ms = v.strip()
+                elif 'cipher' in psc:
+                    v = fzf_run(['aes-xts-plain64','chacha20-poly1305'],
+                                header=f'{BLD}── cipher ──{NC}')
+                    if v: cipher = clean(v)
+                elif 'key-bits' in psc:
+                    v = fzf_run(['256','512'], header=f'{BLD}── key-bits ──{NC}')
+                    if v: keybits = clean(v)
+                elif 'hash' in psc:
+                    v = fzf_run(['sha256','sha512','sha1'],
+                                header=f'{BLD}── hash ──{NC}')
+                    if v: khash = clean(v)
+                elif 'sector' in psc:
+                    v = fzf_run(['512','1024','2048','4096'],
+                                header=f'{BLD}── sector size ──{NC}')
+                    if v: sector = clean(v)
+            if not param_done: continue
+            pw = finput(f'Passphrase for "{kname}":')
+            if not pw: continue
+            pw2 = finput(f'Confirm passphrase for "{kname}":')
+            if pw != pw2: pause('Passphrases do not match.'); continue
+            extra_args = []
+            if pbkdf == 'pbkdf2':
+                extra_args = ['--pbkdf','pbkdf2','--pbkdf-force-iterations','1000','--hash','sha1']
+            else:
+                extra_args = ['--pbkdf',pbkdf,'--pbkdf-memory',ram,
+                              '--pbkdf-parallel',threads,'--iter-time',iter_ms,
+                              '--cipher',cipher,'--key-size',keybits,'--hash',khash,
+                              '--sector-size',sector]
+            rc = subprocess.run(
+                ['sudo','-n','cryptsetup','luksAddKey','--batch-mode',
+                 *extra_args,'--key-slot',free,
+                 '--key-file',str(enc_authkey_path()),str(G.img_path)],
+                input=pw.encode(), capture_output=True).returncode
+            if rc == 0:
+                nf.parent.mkdir(parents=True, exist_ok=True)
+                try: names = json.loads(nf.read_text()) if nf.exists() else {}
+                except: names = {}
+                names[free] = kname; nf.write_text(json.dumps(names, indent=2))
                 pause(f"Key '{kname}' added (slot {free}).")
-            else: pause('Failed.')
+            else:
+                pause('Failed to add key.')
+
+        # ── Unauthorize a verified system ────────────────────────────────────
         elif '[vs:' in sc:
-            vsid=re.search(r'\[vs:([^\]]+)\]',sc)
-            if vsid:
-                vsid=vsid.group(1)
-                if confirm(f"Forget system '{vsid}' and remove its LUKS slot?"):
-                    sl=snap_meta_get(vdir,vsid,'slot')
-                    if sl and sl!='0':
-                        subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
-                                        '--key-file=-',str(G.img_path),sl],
-                                       input=G.verification_cipher.encode(), capture_output=True)
-                    vdir.joinpath(vsid).unlink(missing_ok=True)
-                    pause('Verified system removed.')
+            m = re.search(r'\[vs:([^\]]+)\]', sc)
+            if not m: continue
+            vsid = m.group(1)
+            host = enc_vs_hostname(vsid)
+            action = menu(f'{host}', 'Unauthorize', 'Cancel')
+            if not action or 'Cancel' in action: continue
+            # Lockout check
+            active_vs = sum(1 for v in vs_ids if v != vsid and enc_vs_slot(v) not in ('','0'))
+            if vsid == vid and auto and not pk_slots and active_vs == 0:
+                pause('Cannot unauthorize — this is the only unlock method.\nAdd a passkey first.'); continue
+            if not confirm(f"Unauthorize '{host}'?"): continue
+            sl = enc_vs_slot(vsid)
+            ok = True
+            if sl and sl != '0':
+                if enc_authkey_valid():
+                    rc = subprocess.run(
+                        ['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                         '--key-file',str(enc_authkey_path()),str(G.img_path),sl],
+                        capture_output=True).returncode
+                else:
+                    rc = subprocess.run(
+                        ['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                         '--key-file=-',str(G.img_path),sl],
+                        input=G.verification_cipher.encode(), capture_output=True).returncode
+                if rc != 0: ok = False
+            (vdir/vsid).unlink(missing_ok=True)
+            pause('Unauthorize complete.' if ok else 'Slot removal failed (cache entry removed).')
+
+        # ── Delete a passkey ─────────────────────────────────────────────────
         elif '[s:' in sc:
-            sl=re.search(r'\[s:([^\]]+)\]',sc)
-            if sl:
-                sl=sl.group(1); nm=slot_names.get(sl,f'Key {sl}')
-                if confirm(f"Delete key '{nm}' (slot {sl})?"):
-                    if enc_authkey_valid():
-                        subprocess.run(['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
-                                        '--key-file',str(enc_authkey_path()),str(G.img_path),sl],
-                                       capture_output=True)
-                    try: names=json.loads(nf.read_text()); del names[sl]; nf.write_text(json.dumps(names,indent=2))
-                    except: pass
-                    pause(f"Key '{nm}' deleted.")
+            m = re.search(r'\[s:([^\]]+)\]', sc)
+            if not m: continue
+            sl = m.group(1)
+            nm = slot_names.get(sl, f'Key {sl}')
+            action = menu(f'{nm}', 'Rename', 'Remove', 'Cancel')
+            if not action or 'Cancel' in action: continue
+            if 'Rename' in action:
+                v = finput(f'New name for "{nm}":')
+                if not v: continue
+                nf.parent.mkdir(parents=True, exist_ok=True)
+                try: names = json.loads(nf.read_text()) if nf.exists() else {}
+                except: names = {}
+                names[sl] = v.strip(); nf.write_text(json.dumps(names, indent=2))
+                pause(f'Renamed to "{v.strip()}".')
+                continue
+            # Remove
+            active_vs = sum(1 for vsid in vs_ids if enc_vs_slot(vsid) not in ('','0'))
+            if not auto and len(pk_slots) <= 1:
+                pause('Cannot remove — Auto-Unlock is disabled.\nKeep at least one passkey or re-enable Auto-Unlock first.'); continue
+            if auto and len(pk_slots) <= 1 and active_vs == 0:
+                pause('Cannot remove — this is the only non-auto-unlock key.\nVerify a system or keep this key.'); continue
+            if not confirm(f"Delete key '{nm}' (slot {sl})?"): continue
+            if enc_authkey_valid():
+                rc = subprocess.run(
+                    ['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                     '--key-file',str(enc_authkey_path()),str(G.img_path),sl],
+                    capture_output=True).returncode
+            else:
+                pw = finput(f'Passphrase for "{nm}" to authorise removal:')
+                if not pw: continue
+                rc = subprocess.run(
+                    ['sudo','-n','cryptsetup','luksKillSlot','--batch-mode',
+                     '--key-file=-',str(G.img_path),sl],
+                    input=pw.encode(), capture_output=True).returncode
+            if rc == 0:
+                try:
+                    names = json.loads(nf.read_text()) if nf.exists() else {}
+                    names.pop(sl, None)
+                    nf.write_text(json.dumps(names, indent=2))
+                except: pass
+                pause(f"Key '{nm}' deleted.")
+            else:
+                pause('Failed to delete key.')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/storage.py — persistent storage / profiles
@@ -1806,7 +2204,7 @@ def persistent_storage_menu(cid: str=''):
             items=[_sep('Containers')]
             ct_with_stor=[(c,cname(c)) for c in G.CT_IDS if _stor_count(c)>0]
             for c,n in ct_with_stor:
-                items.append(f' {DIM}◈{NC}  {n}')
+                items.append(f' {DIM}◈  {n}{NC}')
             if not ct_with_stor: items.append(f'{DIM}  (no persistent storage yet){NC}')
             items+=[_nav_sep(),_back_item()]
             sel=fzf_run(items,header=f'{BLD}── Profiles & data ──{NC}')
@@ -1820,13 +2218,24 @@ def persistent_storage_menu(cid: str=''):
         # per-container
         d=G.storage_dir/cid if G.storage_dir else None
         profiles=sorted(d.iterdir()) if d and d.is_dir() else []
+        load_containers()
+        installed = st(cid,'installed',False)
+        running   = tmux_up(tsess(cid))
         items=[_sep('Storage profiles')]
         for p in profiles:
             try: sz=_run(['du','-sh',str(p)],capture=True).stdout.split()[0]
             except: sz='?'
-            items.append(f' {DIM}◈{NC}  {p.name}  {DIM}({sz}){NC}')
+            # Status: running = container is up (profile likely in use), stale = container gone/uninstalled
+            if running:
+                status = f'  {GRN}[running]{NC}'
+            elif not installed:
+                status = f'  {DIM}[stale]{NC}'
+            else:
+                status = f'  {DIM}[free]{NC}'
+            items.append(f' {DIM}◈{NC}  {p.name}  {DIM}({sz}){NC}{status}')
         if not profiles: items.append(f'{DIM}  (no profiles yet){NC}')
         items.append(f' {GRN}+  New profile{NC}')
+        items.append(f' {DIM}⊕  Import profile{NC}')
         items+=[_nav_sep(),_back_item()]
         sel=fzf_run(items,header=f'{BLD}── Profiles — {cname(cid)} ──{NC}')
         if not sel or clean(sel)==L['back']:
@@ -1841,26 +2250,92 @@ def persistent_storage_menu(cid: str=''):
             pd=(G.storage_dir/cid/pname); pd.mkdir(parents=True,exist_ok=True)
             _run(['btrfs','subvolume','create',str(pd)],capture=True)
             pause(f"Profile '{pname}' created.")
+        elif 'Import profile' in sc:
+            _stor_import(cid)
         else:
             # find which profile
             for p in profiles:
                 if p.name in sc:
                     _profile_submenu(cid, p); break
 
+def _stor_export(cid: str, profile: Path):
+    """Export a storage profile to a .tar.zst archive — matches shell _stor_export_menu."""
+    dest_dir = pick_dir()
+    if not dest_dir: return
+    archive = dest_dir/f'{cname(cid)}-{profile.name}.tar.zst'
+    if archive.exists():
+        if not confirm(f'Overwrite existing archive?\n\n  {archive.name}'): return
+    os.system('clear')
+    print(f'\n  {BLD}── Exporting profile ──{NC}\n  {DIM}{profile.name} → {archive}{NC}\n')
+    # Try tar --zstd first; fall back to tar | zstd pipe if not supported
+    r = _run(['tar','--zstd','-cf',str(archive),'-C',str(profile.parent),profile.name])
+    if r.returncode != 0:
+        archive.unlink(missing_ok=True)
+        if shutil.which('zstd'):
+                tar_proc = subprocess.Popen(
+                    ['tar','-cf','-','-C',str(profile.parent),profile.name],
+                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                zst_proc = subprocess.Popen(
+                    ['zstd','-q','-o',str(archive)],
+                    stdin=tar_proc.stdout, stderr=subprocess.DEVNULL)
+                tar_proc.stdout.close()
+                zst_proc.communicate()
+                r_ok = (tar_proc.wait() == 0 and zst_proc.returncode == 0)
+        else:
+            r_ok = False
+    else:
+        r_ok = True
+    if r_ok:
+        pause(f'✓ Exported to:\n  {archive}')
+    else:
+        archive.unlink(missing_ok=True)
+        pause('✗ Export failed. (tar --zstd and zstd pipe both unavailable)')
+
+def _stor_import(cid: str):
+    """Import a .tar.zst storage profile archive — matches shell _stor_import_menu."""
+    f = pick_file()
+    if not f: return
+    if f.suffix not in ('.zst','.gz','.bz2','.xz') and '.tar' not in f.name:
+        pause('Select a .tar.zst (or other tar archive) file.'); return
+    # Extract profile name from archive name: strip container prefix and extension
+    name = re.sub(r'^.*?-','',f.stem).split('.')[0]
+    v = finput(f'Profile name (blank = {name}):')
+    if v is None: return
+    pname = re.sub(r'[^a-zA-Z0-9_\-]','',v or name)
+    if not pname: return
+    dest = G.storage_dir/cid/pname
+    if dest.exists():
+        if not confirm(f"Profile '{pname}' already exists. Overwrite?"): return
+        btrfs_delete(dest) if dest.is_dir() else shutil.rmtree(str(dest),True)
+    dest.mkdir(parents=True, exist_ok=True)
+    _run(['btrfs','subvolume','create',str(dest)], capture=True)
+    os.system('clear')
+    print(f'\n  {BLD}── Importing profile ──{NC}\n  {DIM}{f.name} → {pname}{NC}\n')
+    r = _run(['tar','--zstd' if f.name.endswith('.zst') else '-a',
+              '-xf',str(f),'--strip-components=1','-C',str(dest)])
+    if r.returncode == 0:
+        pause(f"✓ Profile '{pname}' imported.")
+    else:
+        shutil.rmtree(str(dest), True)
+        pause('✗ Import failed.')
+
 def _profile_submenu(cid: str, profile: Path):
     while True:
-        sel=menu(f'{profile.name}',L['stor_rename'],L['stor_delete'])
+        sel = menu(f'{profile.name}',
+                   L['stor_rename'], '⊕  Export', L['stor_delete'])
         if not sel:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
-        if sel==L['stor_rename']:
-            v=finput(f'New name for \'{profile.name}\':')
+        if sel == L['stor_rename']:
+            v = finput(f"New name for '{profile.name}':")
             if not v: continue
-            nn=re.sub(r'[^a-zA-Z0-9_\-]','',v)
+            nn = re.sub(r'[^a-zA-Z0-9_\-]','',v)
             if not nn: continue
-            nd=profile.parent/nn; profile.rename(nd)
+            nd = profile.parent/nn; profile.rename(nd)
             pause(f"Profile renamed to '{nn}'."); return
-        elif sel==L['stor_delete']:
+        elif '⊕  Export' in sel:
+            _stor_export(cid, profile)
+        elif sel == L['stor_delete']:
             if confirm(f"Delete profile '{profile.name}'?"):
                 btrfs_delete(profile) if profile.is_dir() else shutil.rmtree(str(profile),True)
                 pause(f"Profile '{profile.name}' deleted."); return
@@ -1903,10 +2378,37 @@ def _guard_install() -> bool:
     return _guard_space()
 
 def _open_url(url: str):
+    """Open URL in existing browser tab — matches shell _sd_open_url exactly."""
     import subprocess as sp
-    for cmd in ['xdg-open','firefox','chromium','google-chrome']:
+    # Detect default browser via xdg-settings
+    try:
+        r = sp.run(['xdg-settings','get','default-web-browser'], capture_output=True, text=True)
+        browser = r.stdout.strip().removesuffix('.desktop').lower() if r.returncode == 0 else ''
+    except: browser = ''
+    def _try(*cmds):
+        for c in cmds:
+            if shutil.which(c):
+                sp.Popen([c,'--new-tab',url], stderr=sp.DEVNULL, start_new_session=True); return True
+        return False
+    if 'firefox' in browser or 'librewolf' in browser or 'waterfox' in browser or 'floorp' in browser:
+        if _try('firefox','librewolf','waterfox','floorp'): return
+    elif 'vivaldi' in browser:
+        if _try('vivaldi-stable','vivaldi'): return
+    elif 'google-chrome' in browser or 'chrome' in browser:
+        if _try('google-chrome-stable','google-chrome'): return
+    elif 'chromium' in browser:
+        if _try('chromium','chromium-browser'): return
+    elif 'brave' in browser:
+        if _try('brave-browser','brave'): return
+    elif 'microsoft-edge' in browser or 'msedge' in browser:
+        if _try('microsoft-edge'): return
+    # Fallback: gtk-launch with detected browser, then xdg-open
+    if browser:
+        try: sp.Popen(['gtk-launch', browser+'.desktop', url], stderr=sp.DEVNULL, start_new_session=True); return
+        except: pass
+    for cmd in ['xdg-open','firefox','firefox-esr','chromium','chromium-browser','google-chrome']:
         if shutil.which(cmd):
-            sp.Popen([cmd,url], stderr=sp.DEVNULL); return
+            sp.Popen([cmd, url], stderr=sp.DEVNULL, start_new_session=True); return
 
 def _open_in_submenu(cid: str):
     d=sj(cid); port=d.get('meta',{}).get('port') or d.get('environment',{}).get('PORT')
@@ -1914,8 +2416,8 @@ def _open_in_submenu(cid: str):
     if port and str(port)!='0':
         ip=netns_ct_ip(cid)
         items.append(f' {GRN}◈{NC}  Open browser  {DIM}→ http://{ip}:{port}{NC}')
-    items+=[f' {DIM}◈{NC}  Terminal (shell into container)',
-            f' {DIM}◈{NC}  File manager (yazi)',
+    items+=[f' {DIM}◈  Terminal (shell into container){NC}',
+            f' {DIM}◈  File manager (yazi){NC}',
             _nav_sep(),_back_item()]
     sel=fzf_run(items,header=f'{BLD}── Open in ──{NC}')
     if not sel or clean(sel)==L['back']: return
@@ -1923,15 +2425,57 @@ def _open_in_submenu(cid: str):
     if 'Open browser' in sc and port:
         _open_url(f'http://{netns_ct_ip(cid)}:{port}')
     elif 'Terminal' in sc:
-        ip=cpath(cid); sess=f'sdTerm_{cid}'
+        ct_path=cpath(cid); sess=f'sdTerm_{cid}'
+        ns=netns_name()
         if not tmux_up(sess):
+            # Detect bash location for Noble merged-usr (/bin→usr/bin)
+            bash_detect = (f'_b=/bin/bash; [[ ! -f {str(ct_path)!r}/bin/bash && ! -L {str(ct_path)!r}/bin/bash'
+                           f' && -f {str(ct_path)!r}/usr/bin/bash ]] && _b=/usr/bin/bash; ')
             _tmux('new-session','-d','-s',sess,
-                  f'sudo -n chroot {ip!r} bash; tmux kill-session -t {sess} 2>/dev/null||true')
+                  f'sudo -n nsenter --net=/run/netns/{ns} -- '
+                  f'unshare --mount --pid --uts --ipc --fork bash -c '
+                  f'"{bash_detect}sudo -n chroot {str(ct_path)!r} \\"$_b\\""; '
+                  f'tmux kill-session -t {sess} 2>/dev/null||true')
             _tmux('set-option','-t',sess,'detach-on-destroy','off')
-        _tmux('switch-client','-t',sess)
+        if os.environ.get('TMUX'):
+            _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {sess}')
+        else:
+            _tmux('switch-client','-t',sess)
     elif 'File manager' in sc:
         ip=cpath(cid)
         if ip: subprocess.run(['yazi',str(ip)])
+
+def _exposure_toggle_menu(cid: str):
+    """Cycle port exposure: isolated → localhost → public, then apply."""
+    while True:
+        current = exposure_get(cid)
+        nxt = exposure_next(cid)
+        port = sj_get(cid,'meta','port',default='') or sj_get(cid,'environment','PORT',default='')
+        ip   = netns_ct_ip(cid)
+        items = [
+            _sep('Current exposure'),
+            f'  {exposure_label(current)}  {DIM}— port {port}  {ip}{NC}',
+            _sep('Set to'),
+            f' {GRN}→{NC}  {exposure_label("isolated")}  {DIM}blocked{NC}',
+            f' {GRN}→{NC}  {exposure_label("localhost")}  {DIM}this machine{NC}',
+            f' {GRN}→{NC}  {exposure_label("public")}  {DIM}local network{NC}',
+            _nav_sep(), _back_item(),
+        ]
+        sel = fzf_run(items, header=f'{BLD}── Port exposure — {cname(cid)} ──{NC}')
+        if not sel or clean(sel) == L['back']:
+            if G.usr1_fired: G.usr1_fired = False; continue
+            return
+        sc = clean(sel)
+        new_mode = None
+        if 'isolated' in sc:  new_mode = 'isolated'
+        elif 'localhost' in sc: new_mode = 'localhost'
+        elif 'public' in sc:   new_mode = 'public'
+        if new_mode and new_mode != current:
+            exposure_set(cid, new_mode)
+            if tmux_up(tsess(cid)): exposure_apply(cid)
+            pause(f'Port exposure set to: {exposure_label(new_mode)}\n\n'
+                  f'  isolated  — blocked\n  localhost — this machine\n  public    — local network')
+        return
 
 def container_submenu(cid: str):
     while True:
@@ -1968,7 +2512,8 @@ def container_submenu(cid: str):
                 items.append(fin_lbl)
             else: items.append(L['ct_attach_inst'])
         elif running:
-            items+=[L['ct_stop'],L['ct_restart'],L['ct_attach'],L['ct_open_in'],L['ct_log']]
+            items+=[L['ct_stop'],L['ct_restart'],L['ct_attach'],L['ct_open_in'],L['ct_log'],
+                    L['ct_exposure'],L['ct_rename']]
             if action_labels:
                 items.append(_sep('Actions'))
                 items.extend(action_labels)
@@ -1982,13 +2527,15 @@ def container_submenu(cid: str):
                         items.append(f' {DIM}⏱  {cr["name"]}  [stopped]{NC}')
         elif installed:
             items+=[L['ct_start'],L['ct_open_in'],
-                    _sep('Storage'),L['ct_backups'],L['ct_profiles'],L['ct_edit']]
+                    _sep('Management'),
+                    L['ct_edit'],L['ct_rename'],L['ct_exposure'],
+                    _sep('Storage'),L['ct_backups'],L['ct_profiles'],
+                    _sep('Caution')]
             if _UPD_ITEMS:
                 pending=any('→' in strip_ansi(x) or 'Changes detected' in strip_ansi(x) for x in _UPD_ITEMS)
                 lbl=f' {YLW}⬆  Updates{NC}' if pending else '⬆  Updates'
-                items.append(_sep('Caution')); items.append(lbl); items.append(L['ct_uninstall'])
-            else:
-                items+=[_sep('Caution'),L['ct_uninstall']]
+                items.append(lbl)
+            items.append(L['ct_uninstall'])
         else:
             items+=[L['ct_install'],L['ct_edit'],L['ct_rename'],
                     _sep('Caution'),L['ct_remove']]
@@ -2003,7 +2550,13 @@ def container_submenu(cid: str):
             return
         sc=clean(sel)
         # dispatch
-        if sc==L['ct_attach_inst']: _tmux('switch-client','-t',inst_sess(cid))
+        if sc==L['ct_attach_inst']:
+            sess_inst = inst_sess(cid)
+            if tmux_up(sess_inst):
+                if os.environ.get('TMUX'):
+                    _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {sess_inst}')
+                else:
+                    _tmux('switch-client','-t',sess_inst)
         elif sc in (L['ct_finish_inst'],'✓  Finish update'): process_install_finish(cid)
         elif sc==L['ct_install']:
             if not _guard_install(): continue
@@ -2024,13 +2577,23 @@ def container_submenu(cid: str):
         elif sc==L['ct_stop']:
             if confirm(f"Stop '{n}'?"): stop_ct(cid)
         elif sc==L['ct_restart']: stop_ct(cid); time.sleep(0.3); start_ct(cid,'background')
-        elif sc==L['ct_attach']: _tmux('switch-client','-t',tsess(cid))
+        elif sc==L['ct_attach']:
+            sess_ct = tsess(cid)
+            if tmux_up(sess_ct):
+                if os.environ.get('TMUX'):
+                    _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {sess_ct}')
+                else:
+                    _tmux('switch-client','-t',sess_ct)
         elif sc==L['ct_open_in']: _open_in_submenu(cid)
         elif sc==L['ct_log']:
             meta_log=d.get('meta',{}).get('log','')
             lf=cpath(cid)/meta_log if meta_log and cpath(cid) else log_path(cid,'start')
-            if lf.exists(): pause('\n'.join(lf.read_text().splitlines()[-100:]))
+            if lf.exists():
+                fzf_run(lf.read_text(errors='replace').splitlines(),
+                        header=f'{BLD}── Log: {n} ──{NC}  {DIM}(read only){NC}',
+                        extra=['--no-multi','--disabled','--tac'])
             else: pause(f"No log yet for '{n}'.")
+        elif sc==L['ct_exposure']: _exposure_toggle_menu(cid)
         elif sc==L['ct_edit']:
             _edit_container_bp(cid)
         elif sc==L['ct_rename']:
@@ -2073,7 +2636,11 @@ def container_submenu(cid: str):
             for i,cr in enumerate(cron_entries):
                 if cr.get('name','')==cron_clicked:
                     cs=cron_sess(cid,i)
-                    if tmux_up(cs): _tmux('switch-client','-t',cs)
+                    if tmux_up(cs):
+                        if os.environ.get('TMUX'):
+                            _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {cs}')
+                        else:
+                            _tmux('switch-client','-t',cs)
                     else: pause(f"Cron '{cr['name']}' is not running.")
                     break
         else:
@@ -2111,13 +2678,15 @@ def _edit_container_bp(cid: str):
     if st(cid,'installed'): build_start_script(cid)
 
 def _rename_container(cid: str, new_name: str) -> bool:
-    if st(cid,'installed'): pause('Rename only available for uninstalled containers.'); return False
-    new_name=re.sub(r'[^a-zA-Z0-9_\-]','',new_name)
+    new_name = re.sub(r'[^a-zA-Z0-9_\-]','',new_name).strip()
     if not new_name: pause('Name cannot be empty.'); return False
     load_containers()
     for c in G.CT_IDS:
-        if c!=cid and cname(c)==new_name: pause(f"Container '{new_name}' already exists."); return False
+        if c != cid and cname(c) == new_name:
+            pause(f"Container '{new_name}' already exists."); return False
     set_st(cid,'name',new_name)
+    # Rebuild start script if installed so log paths etc. use new name
+    if st(cid,'installed') and cpath(cid): build_start_script(cid)
     pause(f"Container renamed to '{new_name}'."); return True
 
 def _run_action(cid: str, ai: int, dsl: str):
@@ -2154,8 +2723,10 @@ def _run_action(cid: str, ai: int, dsl: str):
             f.write(dsl+'\n')
     os.chmod(runner.name,0o755)
     if tmux_up(sess):
-        pause(f"Action is still running.\n\n  Press {KB['tmux_detach']} to detach.")
-        _tmux('switch-client','-t',sess)
+        if os.environ.get('TMUX'):
+            _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {sess}')
+        else:
+            _tmux('switch-client','-t',sess)
     else:
         _tmux('new-session','-d','-s',sess,
               f'bash {runner.name!r}; rm -f {runner.name!r}; '
@@ -2164,8 +2735,10 @@ def _run_action(cid: str, ai: int, dsl: str):
               f'tmux switch-client -t simpleDocker 2>/dev/null||true; '
               f'tmux kill-session -t {sess!r} 2>/dev/null||true')
         _tmux('set-option','-t',sess,'detach-on-destroy','off')
-        pause(f"Starting action...\n\n  Press {KB['tmux_detach']} to detach.")
-        _tmux('switch-client','-t',sess)
+        if os.environ.get('TMUX'):
+            _tmux('new-window','-t','simpleDocker',f'tmux attach-session -t {sess}')
+        else:
+            _tmux('switch-client','-t',sess)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/container.py — update item builders
@@ -2178,21 +2751,25 @@ def _build_update_items_for(cid: str, items: list, idx: list):
     if not stype: return
     # Blueprint updates: scan BLUEPRINTS_DIR for matching storage_type
     if G.blueprints_dir and G.blueprints_dir.is_dir():
-        for bf in G.blueprints_dir.glob('*.toml'):
-            try:
-                bp=bp_parse(bf.read_text())
-                if bp.get('meta',{}).get('storage_type')!=stype: continue
-                new_ver=str(bp.get('meta',{}).get('version',''))
-                bname=bf.stem
-                src=G.containers_dir/cid/'service.src'
-                if cur_ver==new_ver:
-                    same=(src.exists() and src.read_text()==bf.read_text())
-                    if same: entry=f'{DIM}[B] {bname} — ✓ v{cur_ver}{NC}'
-                    else: entry=f'{DIM}[B]{NC} {bname} {DIM}—{NC} {YLW}Changes detected{NC}'
-                else:
-                    entry=f'{DIM}[B]{NC} {bname} {DIM}—{NC} {YLW}{cur_ver or "?"}{NC} → {GRN}{new_ver or "?"}{NC}'
-                items.append(entry); idx.append(str(len(idx)))
-            except: pass
+        seen_stems = set()
+        for ext in ('*.container', '*.toml'):
+            for bf in G.blueprints_dir.glob(ext):
+                if bf.stem in seen_stems: continue
+                seen_stems.add(bf.stem)
+                try:
+                    bp=bp_parse(bf.read_text())
+                    if bp.get('meta',{}).get('storage_type')!=stype: continue
+                    new_ver=str(bp.get('meta',{}).get('version',''))
+                    bname=bf.stem
+                    src=G.containers_dir/cid/'service.src'
+                    if cur_ver==new_ver:
+                        same=(src.exists() and src.read_text()==bf.read_text())
+                        if same: entry=f'{DIM}[B] {bname} — ✓ v{cur_ver}{NC}'
+                        else: entry=f'{DIM}[B]{NC} {bname} {DIM}—{NC} {YLW}Changes detected{NC}'
+                    else:
+                        entry=f'{DIM}[B]{NC} {bname} {DIM}—{NC} {YLW}{cur_ver or "?"}{NC} → {GRN}{new_ver or "?"}{NC}'
+                    items.append(entry); idx.append(str(len(idx)))
+                except: pass
 
 def _build_ubuntu_update_item_for(cid: str, items: list, idx: list):
     ub_cache_read()
@@ -2229,7 +2806,12 @@ def _do_pkg_update(cid: str):
 
 def _do_blueprint_update(cid: str, idx: int):
     d=sj(cid); stype=d.get('meta',{}).get('storage_type','')
-    bps=[f for f in (G.blueprints_dir.glob('*.toml') if G.blueprints_dir else []) if True]
+    bps=[]
+    if G.blueprints_dir:
+        seen=set()
+        for ext in ('*.container','*.toml'):
+            for f in G.blueprints_dir.glob(ext):
+                if f.stem not in seen: bps.append(f); seen.add(f.stem)
     try: bf=bps[idx] if idx<len(bps) else None
     except: bf=None
     if not bf: pause('Blueprint not found.'); return
@@ -2300,16 +2882,22 @@ def containers_submenu():
         n_running=sum(1 for c in G.CT_IDS if tmux_up(tsess(c)))
         items=[f'{BLD}  ── Containers ──────────────────────{NC}']
         for cid in G.CT_IDS:
-            d=sj(cid); n=cname(cid)
-            port=str(d.get('meta',{}).get('port') or d.get('environment',{}).get('PORT',''))
-            installed=st(cid,'installed',False)
+            # Batch-load service.json + state.json once per container — matches .sh
+            # single jq call optimisation (avoids 2 file opens per container per render)
+            try: _sj = json.loads((G.containers_dir/cid/'service.json').read_text())
+            except: _sj = {}
+            try: _st = json.loads((G.containers_dir/cid/'state.json').read_text())
+            except: _st = {}
+            n        = _st.get('name') or f'(unnamed-{cid})'
+            installed= _st.get('installed', False)
+            port     = str(_sj.get('meta',{}).get('port') or _sj.get('environment',{}).get('PORT',''))
             ok_f=G.containers_dir/cid/'.install_ok'; fail_f=G.containers_dir/cid/'.install_fail'
             if is_installing(cid) or ok_f.exists() or fail_f.exists(): dot=f'{YLW}◈{NC}'
             elif tmux_up(tsess(cid)):
                 dot=f'{GRN}◈{NC}' if health_check(cid) else f'{YLW}◈{NC}'
             elif installed: dot=f'{RED}◈{NC}'
             else: dot=f'{DIM}◈{NC}'
-            dlg=d.get('meta',{}).get('dialogue','')
+            dlg=_sj.get('meta',{}).get('dialogue','')
             disp=f'{n}  {DIM}— {dlg}{NC}' if dlg else n
             sz_lbl=''; sc_path=G.cache_dir/'sd_size'/cid
             if sc_path.exists(): sz_lbl=f'{DIM}[{sc_path.read_text().strip()}gb]{NC} '
@@ -2331,158 +2919,436 @@ def containers_submenu():
         if m: container_submenu(m.group(1))
 
 def install_method_menu():
-    bps=([f.stem for f in G.blueprints_dir.glob('*.toml')] if G.blueprints_dir and G.blueprints_dir.is_dir() else [])
-    items=[f'{BLD}  ── Method ──────────────────────────{NC}',
-           f' {GRN}◈{NC}  From blueprint',
-           f' {GRN}◈{NC}  Blank container',
-           f' {GRN}◈{NC}  Import .toml file',
-           _nav_sep(),_back_item()]
-    sel=fzf_run(items,header=f'{BLD}── New container ──{NC}')
-    if not sel or clean(sel)==L['back']: return
-    sc=clean(sel)
-    cid=rand_id(); cdir=G.containers_dir/cid; cdir.mkdir(parents=True,exist_ok=True)
-    if 'From blueprint' in sc:
-        if not bps: pause('No blueprints found. Create one first.'); shutil.rmtree(str(cdir),True); return
-        items2=[f' {DIM}◈{NC}  {b}' for b in bps]+[_nav_sep(),_back_item()]
-        sel2=fzf_run(items2,header=f'{BLD}── Select blueprint ──{NC}')
-        if not sel2 or clean(sel2)==L['back']: shutil.rmtree(str(cdir),True); return
-        bname=clean(sel2).lstrip('◈').strip()
-        bf=G.blueprints_dir/f'{bname}.toml'
-        if not bf.exists(): shutil.rmtree(str(cdir),True); return
-        shutil.copy(str(bf),str(cdir/'service.src'))
-        bp_compile(cdir/'service.src',cid)
-        name=sj_get(cid,'meta','name') or bname
-    elif 'Blank container' in sc:
-        v=finput('Container name:')
-        if not v: shutil.rmtree(str(cdir),True); return
-        name=re.sub(r'[^a-zA-Z0-9_\-]','',v)
-        if not name: shutil.rmtree(str(cdir),True); return
-        src=cdir/'service.src'; src.write_text(bp_template())
-        bp_compile(src,cid)
-    elif 'Import' in sc:
-        f=pick_file()
-        if not f or f.suffix not in ('.toml','.container'):
-            shutil.rmtree(str(cdir),True); return
-        shutil.copy(str(f),str(G.blueprints_dir/f.name))
-        shutil.copy(str(f),str(cdir/'service.src'))
-        bp_compile(cdir/'service.src',cid)
-        name=sj_get(cid,'meta','name') or f.stem
-    else: shutil.rmtree(str(cdir),True); return
-    (cdir/'state.json').write_text(json.dumps({'name':name,'install_path':cid,'installed':False},indent=2))
-    pause(f"Container '{name}' created. Select it to install.")
+    """New container — matches .sh _install_method_menu exactly."""
+    bps  = _list_blueprint_names()
+    pbps = _list_persistent_names()
+    ibps = _list_imported_names()
+    load_containers()
+
+    items = [f'{BLD}  ── Install from blueprint ───────────{NC}\t__sep__']
+    if bps or pbps or ibps:
+        for n in bps:  items.append(f'   {DIM}◈{NC}  {n}\tbp:{n}')
+        for n in pbps: items.append(f'   {BLU}◈{NC}  {n}  {DIM}[Persistent]{NC}\tpbp:{n}')
+        for n in ibps: items.append(f'   {CYN}◈{NC}  {n}  {DIM}[Imported]{NC}\tibp:{n}')
+    else:
+        items.append(f'{DIM}  No blueprints found{NC}\t__sep__')
+
+    items.append(f'{BLD}  ── Clone existing container ─────────{NC}\t__sep__')
+    has_inst = False
+    for cid in G.CT_IDS:
+        if not st(cid,'installed'): continue
+        has_inst = True
+        items.append(f'   {DIM}◈{NC}  {cname(cid)}\tclone:{cid}')
+    if not has_inst:
+        items.append(f'{DIM}  No installed containers found{NC}\t__sep__')
+
+    items += [f'{BLD}  ── Navigation ───────────────────────{NC}\t__sep__',
+              f'{DIM} {L["back"]}{NC}\t__back__']
+
+    sel = fzf_run(items, header=f'{BLD}── Select installation method ──{NC}',
+                  with_nth='1', delimiter='\t')
+    if not sel: return
+    tag = sel.split('\t')[-1].strip() if '\t' in sel else ''
+    if not tag or tag in ('__back__','__sep__'): return
+
+    cid = rand_id()
+    cdir = G.containers_dir/cid
+    cdir.mkdir(parents=True, exist_ok=True)
+
+    if tag.startswith('bp:'):
+        bname = tag[3:]
+        bf = _bp_find_file(bname)
+        if not bf: pause(f"Blueprint '{bname}' not found."); shutil.rmtree(str(cdir),True); return
+        # suggest name from blueprint
+        try:
+            sug = bp_parse(bf.read_text()).get('meta',{}).get('name','') or bname
+        except: sug = bname
+        v = finput(f'Container name (default: {sug}):')
+        if v is None: shutil.rmtree(str(cdir),True); return
+        ct_name = v.strip() or sug
+        shutil.copy(str(bf), str(cdir/'service.src'))
+        bp_compile(cdir/'service.src', cid)
+
+    elif tag.startswith('pbp:'):
+        bname = tag[4:]
+        pd = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
+        bf = None
+        if pd:
+            for ext in ('.container','.toml'):
+                t = pd/f'{bname}{ext}'
+                if t.exists(): bf = t; break
+        if not bf: pause(f"Blueprint '{bname}' not found."); shutil.rmtree(str(cdir),True); return
+        v = finput(f'Container name (default: {bname}):')
+        if v is None: shutil.rmtree(str(cdir),True); return
+        ct_name = v.strip() or bname
+        shutil.copy(str(bf), str(cdir/'service.src'))
+        bp_compile(cdir/'service.src', cid)
+
+    elif tag.startswith('ibp:'):
+        bname = tag[4:]
+        bf = _get_imported_bp_path(bname)
+        if not bf: pause(f"Could not locate imported blueprint '{bname}'."); shutil.rmtree(str(cdir),True); return
+        v = finput(f'Container name (default: {bname}):')
+        if v is None: shutil.rmtree(str(cdir),True); return
+        ct_name = v.strip() or bname
+        shutil.copy(str(bf), str(cdir/'service.src'))
+        bp_compile(cdir/'service.src', cid)
+
+    elif tag.startswith('clone:'):
+        src_cid = tag[6:]
+        shutil.rmtree(str(cdir), True)  # clone uses its own dir
+        _clone_source_submenu(src_cid)
+        return
+
+    else:
+        shutil.rmtree(str(cdir), True); return
+
+    ct_name = re.sub(r'[^a-zA-Z0-9_\-]','',ct_name) or cname(cid) or 'container'
+    sf = cdir/'state.json'
+    try: data = json.loads(sf.read_text()) if sf.exists() else {}
+    except: data = {}
+    data.update({'name': ct_name, 'install_path': cid, 'installed': False})
+    sf.write_text(json.dumps(data, indent=2))
+    set_st(cid, 'name', ct_name)
+    pause(f"Container '{ct_name}' created. Select it to install.")
+
+def _clone_source_submenu(src_cid: str):
+    """Match .sh _clone_source_submenu — choose current state or a snapshot to clone from."""
+    src_name = cname(src_cid); src_path = cpath(src_cid)
+    sdir = snap_dir(src_cid)
+    if tmux_up(tsess(src_cid)): pause(f"Stop '{src_name}' before cloning."); return
+    if not src_path or not src_path.is_dir(): pause('Container not installed.'); return
+
+    items = [f'{BLD}  ── Main ─────────────────────────────{NC}\t__sep__',
+             f'   {DIM}◈{NC}  Current state\tcurrent']
+    pi = sdir/'Post-Installation' if sdir.is_dir() else None
+    if pi and pi.is_dir():
+        ts = snap_meta_get(sdir,'Post-Installation','ts')
+        items.append(f'   {DIM}◈{NC}  Post-Installation  {DIM}({ts}){NC}\tpost')
+
+    other_ids = []
+    if sdir.is_dir():
+        for f in sdir.glob('*.meta'):
+            sid = f.stem
+            if sid == 'Post-Installation' or not (sdir/sid).is_dir(): continue
+            other_ids.append(sid)
+
+    items.append(f'{BLD}  ── Other ────────────────────────────{NC}\t__sep__')
+    if other_ids:
+        for sid in other_ids:
+            ts = snap_meta_get(sdir, sid, 'ts')
+            items.append(f'   {DIM}◈{NC}  {sid}  {DIM}({ts}){NC}\t{sid}')
+    else:
+        items.append(f'{DIM}  No other backups found{NC}\t__sep__')
+
+    items += [f'{BLD}  ── Navigation ───────────────────────{NC}\t__sep__',
+              f'{DIM} {L["back"]}{NC}\t__back__']
+
+    sel = fzf_run(items, header=f'{BLD}── Clone \'{src_name}\' from ──{NC}',
+                  with_nth='1', delimiter='\t')
+    if not sel: return
+    tag = sel.split('\t')[-1].strip() if '\t' in sel else ''
+    if not tag or tag in ('__back__','__sep__'): return
+
+    v = finput('Name for the clone:')
+    if not v: return
+    clone_name = re.sub(r'[^a-zA-Z0-9_\-]','',v)
+    if not clone_name: return
+
+    if tag == 'current':
+        _clone_container(src_cid, clone_name)
+    elif tag == 'post':
+        clone_from_snap(src_cid, pi, 'Post-Installation', clone_name)
+    else:
+        clone_from_snap(src_cid, sdir/tag, tag, clone_name)
+
+def _clone_container(src_cid: str, clone_name: str):
+    """Clone an installed container's current state."""
+    src_path = cpath(src_cid)
+    if not src_path or not src_path.is_dir(): pause('Container not installed.'); return
+    clone_cid = rand_id()
+    clone_dir = G.containers_dir/clone_cid; clone_dir.mkdir(parents=True, exist_ok=True)
+    clone_path = G.installations_dir/clone_cid
+    for f in ('service.json','state.json','resources.json'):
+        src = G.containers_dir/src_cid/f
+        if src.exists(): shutil.copy(str(src), str(clone_dir/f))
+    try:
+        data = json.loads((clone_dir/'state.json').read_text())
+        data['name'] = clone_name; data['install_path'] = clone_cid
+        (clone_dir/'state.json').write_text(json.dumps(data, indent=2))
+    except: pass
+    if btrfs_snap(src_path, clone_path, readonly=False):
+        pause(f"Cloned '{cname(src_cid)}' → '{clone_name}'")
+    else:
+        shutil.copytree(str(src_path), str(clone_path))
+        pause(f"Cloned '{cname(src_cid)}' → '{clone_name}' (plain copy)")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/groups.py
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _grp_path(gid: str) -> Path:
+    return G.groups_dir/f'{gid}.toml'
+
 def _list_groups() -> List[str]:
     if not G.groups_dir or not G.groups_dir.is_dir(): return []
-    return [d.name for d in G.groups_dir.iterdir() if (d/'meta.json').exists()]
+    return [f.stem for f in G.groups_dir.glob('*.toml')]
 
-def _grp_name(gid: str) -> str:
-    try: return json.loads((G.groups_dir/gid/'meta.json').read_text()).get('name',gid)
-    except: return gid
+def _grp_read_field(gid: str, field: str) -> str:
+    try:
+        for line in _grp_path(gid).read_text().splitlines():
+            if re.match(rf'^{field}\s*=', line):
+                return line.split('=',1)[1].strip()
+    except: pass
+    return ''
 
-def _grp_members(gid: str) -> List[str]:
-    f=G.groups_dir/gid/'members'
-    return f.read_text().splitlines() if f.exists() else []
+def _grp_containers(gid: str) -> List[str]:
+    raw = _grp_read_field(gid, 'start').strip('{}')
+    steps = [s.strip() for s in raw.split(',') if s.strip()]
+    return sorted(set(s for s in steps if not s.lower().startswith('wait')))
+
+def _grp_seq_steps(gid: str) -> List[str]:
+    raw = _grp_read_field(gid, 'start').strip('{}')
+    return [s.strip() for s in raw.split(',') if s.strip()]
+
+def _grp_seq_save(gid: str, steps: List[str]):
+    joined = ', '.join(steps)
+    p = _grp_path(gid)
+    try: text = p.read_text()
+    except: text = f'name = {gid}\ndesc =\ncontainers =\nstart = {{  }}\n'
+    if re.search(r'^start\s*=', text, re.M):
+        text = re.sub(r'^start\s*=.*', f'start = {{ {joined} }}', text, flags=re.M)
+    else:
+        text += f'start = {{ {joined} }}\n'
+    cts = ', '.join(sorted(set(s for s in steps if not s.lower().startswith('wait'))))
+    if re.search(r'^containers\s*=', text, re.M):
+        text = re.sub(r'^containers\s*=.*', f'containers = {cts}', text, flags=re.M)
+    else:
+        text += f'containers = {cts}\n'
+    p.write_text(text)
+
+def _ct_id_by_name(ct_name: str) -> Optional[str]:
+    if not G.containers_dir: return None
+    for d in G.containers_dir.iterdir():
+        sf = d/'state.json'
+        if not sf.exists(): continue
+        try:
+            if json.loads(sf.read_text()).get('name') == ct_name: return d.name
+        except: pass
+    return None
+
+def _create_group(gname: str):
+    gname = re.sub(r'[^a-zA-Z0-9_\- ]','',gname)
+    if not gname: pause('Name cannot be empty.'); return
+    import random as _r, string as _s
+    while True:
+        gid = ''.join(_r.choices(_s.ascii_lowercase+_s.digits, k=8))
+        if not _grp_path(gid).exists(): break
+    _grp_path(gid).write_text(f'name = {gname}\ndesc =\ncontainers =\nstart = {{  }}\n')
+    pause(f"Group '{gname}' created.")
+
+def _start_group(gid: str):
+    steps = _grp_seq_steps(gid)
+    batch: List[str] = []
+    def _flush():
+        for bname in batch:
+            bcid = _ct_id_by_name(bname)
+            if bcid:
+                if not tmux_up(tsess(bcid)): start_ct(bcid, 'background')
+        batch.clear()
+    for step in steps:
+        sl = step.lower().strip()
+        m = re.match(r'^wait\s+(\d+)$', sl)
+        mf = re.match(r'^wait\s+for\s+(.+)$', sl)
+        if m:
+            _flush(); time.sleep(int(m.group(1)))
+        elif mf:
+            _flush()
+            wcid = _ct_id_by_name(mf.group(1))
+            if wcid:
+                waited = 0
+                while not tmux_up(tsess(wcid)) and waited < 60:
+                    time.sleep(1); waited += 1
+                time.sleep(2)
+        else:
+            batch.append(step)
+    _flush()
+
+def _stop_group(gid: str):
+    steps = _grp_seq_steps(gid)
+    for step in reversed(steps):
+        if step.lower().startswith('wait'): continue
+        cid = _ct_id_by_name(step)
+        if not cid or not tmux_up(tsess(cid)): continue
+        stop_ct(cid)
+
+def _grp_pick_container() -> Optional[str]:
+    if not G.containers_dir: return None
+    names = [cname(d.name) for d in G.containers_dir.iterdir()
+             if (d/'state.json').exists() and cname(d.name)]
+    if not names: pause('No containers found.'); return None
+    sel = fzf_run([f' {DIM}◈  {n}{NC}' for n in sorted(names)],
+                  header=f'{BLD}── Select container ──{NC}')
+    if not sel: return None
+    return clean(sel).lstrip('◈').strip() or None
+
+def _grp_pick_wait() -> Optional[str]:
+    sel = fzf_run(['Wait seconds', 'Wait for container'],
+                  header=f'{BLD}── Wait type ──{NC}')
+    if not sel: return None
+    sc = clean(sel)
+    if 'seconds' in sc:
+        v = finput('Seconds to wait:')
+        if not v: return None
+        n = re.sub(r'[^0-9]','',v)
+        if not n: pause('Invalid number.'); return None
+        return f'Wait {n}'
+    else:
+        ct = _grp_pick_container()
+        if not ct: return None
+        return f'Wait for {ct}'
+
+def _grp_pick_step() -> Optional[str]:
+    sel = fzf_run(['Container', 'Wait'],
+                  header=f'{BLD}── Add step ──{NC}')
+    if not sel: return None
+    sc = clean(sel)
+    if sc == 'Container': return _grp_pick_container()
+    else: return _grp_pick_wait()
 
 def groups_menu():
     while True:
-        gids=_list_groups()
-        n_active=0
+        load_containers()
+        gids = _list_groups()
+        n_active = 0
         for gid in gids:
-            for mn in _grp_members(gid):
-                for c in G.CT_IDS:
-                    if cname(c)==mn and tmux_up(tsess(c)): n_active+=1; break
-        items=[f'{BLD}  ── Groups ──────────────────────────{NC}']
+            for mn in _grp_containers(gid):
+                cid = _ct_id_by_name(mn)
+                if cid and tmux_up(tsess(cid)): n_active += 1; break
+        items = [f'{BLD}  ── Groups ───────────────────────────{NC}']
         for gid in gids:
-            members=_grp_members(gid)
-            running=sum(1 for mn in members for c in G.CT_IDS if cname(c)==mn and tmux_up(tsess(c)))
-            lbl=f'{GRN}{running} active{NC}{DIM}/{len(members)}{NC}' if running else f'{DIM}{len(members)}{NC}'
-            items.append(f' {CYN}▶{NC}  {_grp_name(gid)}  {lbl}')
+            gname = _grp_read_field(gid,'name') or gid
+            containers = _grp_containers(gid)
+            n_running = sum(1 for mn in containers
+                            for c in [_ct_id_by_name(mn)] if c and tmux_up(tsess(c)))
+            n_total = len(containers)
+            dot = f'{GRN}▶{NC}' if n_running > 0 else f'{DIM}▶{NC}'
+            items.append(f' {dot}  {gname:<24} {DIM}{n_running}/{n_total} running{NC}')
         if not gids: items.append(f'{DIM}  (no groups yet){NC}')
-        items+=[f'{GRN} +  {L["grp_new"]}{NC}',_nav_sep(),_back_item()]
-        sel=fzf_run(items,header=f'{BLD}── Groups ──{NC}  {DIM}[{len(gids)} · {GRN}{n_active} active{NC}{DIM}]{NC}')
-        if not sel or clean(sel)==L['back']:
+        items += [f'{GRN} +  {L["grp_new"]}{NC}', _nav_sep(), _back_item()]
+        n_grp_active = sum(1 for gid in gids
+                           for mn in _grp_containers(gid)
+                           for cid in [_ct_id_by_name(mn)] if cid and tmux_up(tsess(cid)))
+        sel = fzf_run(items,
+            header=f'{BLD}── Groups ──{NC}  {DIM}[{len(gids)} · {GRN}{n_active} active{NC}{DIM}]{NC}')
+        if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
-        sc=clean(sel)
+        sc = clean(sel)
         if L['grp_new'] in sc:
-            v=finput('Group name:')
+            v = finput('Group name:')
             if not v: continue
-            gname=re.sub(r'[^a-zA-Z0-9_\- ]','',v)
-            if not gname: continue
-            gid=rand_id(); gd=G.groups_dir/gid; gd.mkdir(parents=True,exist_ok=True)
-            (gd/'meta.json').write_text(json.dumps({'name':gname},indent=2))
-            continue
+            _create_group(v); continue
         for gid in gids:
-            if _grp_name(gid) in sc: _group_submenu(gid); break
+            gname = _grp_read_field(gid,'name') or gid
+            if gname in sc: _group_submenu(gid); break
 
 def _group_submenu(gid: str):
     while True:
-        members=_grp_members(gid); name=_grp_name(gid)
-        load_containers()
-        running=sum(1 for mn in members for c in G.CT_IDS if cname(c)==mn and tmux_up(tsess(c)))
-        items=[_sep('Actions'),
-               f' {GRN}▶{NC}  Start all', f' {RED}■{NC}  Stop all',
-               _sep('Members')]
-        for mn in members:
-            cid_m=next((c for c in G.CT_IDS if cname(c)==mn), None)
-            if cid_m:
-                dot=f'{GRN}◈{NC}' if tmux_up(tsess(cid_m)) else f'{RED}◈{NC}'
-            else: dot=f'{DIM}◈{NC}'
-            items.append(f' {dot}  {mn}')
-        if not members: items.append(f'{DIM}  (no members){NC}')
-        items+=[f' {GRN}+  Add container{NC}',_sep('Management'),
-                f' {DIM}✎  Rename{NC}',f' {DIM}×  Delete group{NC}',_nav_sep(),_back_item()]
-        sel=fzf_run(items,header=f'{BLD}── {name} ──{NC}  {DIM}[{running} running/{len(members)}]{NC}')
-        if not sel or clean(sel)==L['back']:
+        clear = os.system('clear')
+        gname = _grp_read_field(gid,'name') or gid
+        gdesc = _grp_read_field(gid,'desc')
+        steps = _grp_seq_steps(gid)
+        n_running = sum(1 for s in steps if not s.lower().startswith('wait')
+                        for cid in [_ct_id_by_name(s)] if cid and tmux_up(tsess(cid)))
+        is_running = n_running > 0
+        items = [f'{BLD}  ── General ──────────────────────────{NC}']
+        if is_running:
+            items.append(f' {RED}■  Stop group{NC}')
+        else:
+            items += [f' {GRN}▶  Start group{NC}',
+                      f' {BLU}≡  Edit name/desc{NC}',
+                      f' {RED}×  Delete group{NC}']
+        items.append(f'{BLD}  ── Sequence ─────────────────────────{NC}')
+        for s in steps:
+            if s.lower().startswith('wait'):
+                items.append(f' {YLW}⏱{NC}  {DIM}{s}{NC}')
+            else:
+                cid = _ct_id_by_name(s)
+                if not cid:
+                    dot = f'{RED}◈{NC}'; st_s = f'{DIM} — not found{NC}'
+                elif tmux_up(tsess(cid)):
+                    dot = f'{GRN}◈{NC}'; st_s = f'  {GRN}running{NC}'
+                else:
+                    dot = f'{RED}◈{NC}'; st_s = f'  {DIM}stopped{NC}'
+                items.append(f' {dot}  {s}{st_s}')
+        if not steps: items.append(f' {DIM}(empty — add a step below){NC}')
+        items += [f' {GRN}+  Add step{NC}', _nav_sep(), _back_item()]
+        hdr_dot = f'{GRN}▶{NC}' if is_running else f'{DIM}▶{NC}'
+        hdr = f'{hdr_dot}  {BLD}{gname}{NC}'
+        if gdesc: hdr += f'  {DIM}— {gdesc}{NC}'
+        sel = fzf_run(items, header=f'{BLD}── {hdr} ──{NC}  {DIM}[{n_running} running]{NC}')
+        if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
-        sc=clean(sel)
-        if 'Start all' in sc:
-            for mn in members:
-                cid_m=next((c for c in G.CT_IDS if cname(c)==mn),None)
-                if cid_m and st(cid_m,'installed') and not tmux_up(tsess(cid_m)):
-                    start_ct(cid_m,'background')
-        elif 'Stop all' in sc:
-            for mn in members:
-                cid_m=next((c for c in G.CT_IDS if cname(c)==mn),None)
-                if cid_m and tmux_up(tsess(cid_m)): stop_ct(cid_m)
-        elif 'Add container' in sc:
-            avail=[cname(c) for c in G.CT_IDS if cname(c) not in members]
-            if not avail: pause('All containers are already in this group.'); continue
-            items2=[f' {DIM}◈{NC}  {n}' for n in avail]+[_nav_sep(),_back_item()]
-            sel2=fzf_run(items2,header=f'{BLD}── Add to {name} ──{NC}')
-            if sel2 and clean(sel2)!=L['back']:
-                mname=clean(sel2).lstrip('◈').strip()
-                mf=G.groups_dir/gid/'members'
-                with open(mf,'a') as f2: f2.write(mname+'\n')
-        elif '✎  Rename' in sc:
-            v=finput(f"New name for '{name}':"); 
+        sc = clean(sel)
+        if 'Start group' in sc:
+            _start_group(gid)
+        elif 'Stop group' in sc:
+            _stop_group(gid)
+        elif 'Edit name/desc' in sc:
+            v = finput(f'Group name ({gname}):')
             if v:
-                nn=re.sub(r'[^a-zA-Z0-9_\- ]','',v)
-                if nn:
-                    (G.groups_dir/gid/'meta.json').write_text(json.dumps({'name':nn},indent=2))
-        elif '×  Delete group' in sc:
-            if confirm(f"Delete group '{name}'?\n\n  Containers are not affected."):
-                shutil.rmtree(str(G.groups_dir/gid),True)
-                pause(f"Group '{name}' deleted."); return
+                nn = v.strip() or gname
+                try:
+                    text = _grp_path(gid).read_text()
+                    text = re.sub(r'^name\s*=.*', f'name = {nn}', text, flags=re.M)
+                    _grp_path(gid).write_text(text)
+                except: pass
+            v2 = finput(f'Description ({gdesc}):')
+            if v2 is not None:
+                try:
+                    text = _grp_path(gid).read_text()
+                    if re.search(r'^desc\s*=', text, re.M):
+                        text = re.sub(r'^desc\s*=.*', f'desc = {v2}', text, flags=re.M)
+                    else:
+                        text += f'desc = {v2}\n'
+                    _grp_path(gid).write_text(text)
+                except: pass
+        elif 'Delete group' in sc:
+            if confirm(f"Delete group '{gname}'?"):
+                _grp_path(gid).unlink(missing_ok=True)
+                pause('Group deleted.'); return
+        elif 'Add step' in sc or '(empty' in sc:
+            step = _grp_pick_step()
+            if step:
+                steps.append(step)
+                _grp_seq_save(gid, steps)
         else:
-            # member selected — sub-menu
-            for mn in members:
-                if mn in sc:
-                    sel3=menu(mn,'Open container menu','Remove from group')
-                    if sel3=='Open container menu':
-                        cid_m=next((c for c in G.CT_IDS if cname(c)==mn),None)
-                        if cid_m: container_submenu(cid_m)
-                    elif sel3=='Remove from group':
-                        if confirm(f"Remove '{mn}' from group '{name}'?"):
-                            mf=G.groups_dir/gid/'members'
-                            lines=[l for l in mf.read_text().splitlines() if l!=mn]
-                            mf.write_text('\n'.join(lines)+'\n')
-                    break
+            # Step clicked — edit sub-menu
+            matched = None
+            for i, s in enumerate(steps):
+                if s in sc: matched = i; break
+            if matched is None: continue
+            action = fzf_run(['Add before','Edit','Add after','Remove'],
+                             header=f'{BLD}── Edit step ──{NC}')
+            if not action: continue
+            ac = clean(action)
+            if 'Add before' in ac:
+                step = _grp_pick_step()
+                if step: steps.insert(matched, step); _grp_seq_save(gid, steps)
+            elif 'Add after' in ac:
+                step = _grp_pick_step()
+                if step: steps.insert(matched+1, step); _grp_seq_save(gid, steps)
+            elif 'Edit' in ac:
+                old = steps[matched]
+                if old.lower().startswith('wait'):
+                    step = _grp_pick_wait()
+                else:
+                    step = _grp_pick_container()
+                if step: steps[matched] = step; _grp_seq_save(gid, steps)
+            elif 'Remove' in ac:
+                steps.pop(matched); _grp_seq_save(gid, steps)
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/blueprints.py
@@ -2490,7 +3356,13 @@ def _group_submenu(gid: str):
 
 def _list_blueprint_names() -> List[str]:
     if not G.blueprints_dir or not G.blueprints_dir.is_dir(): return []
-    return [f.stem for f in G.blueprints_dir.glob('*.toml')]
+    found = []
+    seen = set()
+    for ext in ('*.container', '*.toml'):
+        for f in G.blueprints_dir.glob(ext):
+            if f.stem not in seen:
+                found.append(f.stem); seen.add(f.stem)
+    return sorted(found)
 
 def _bp_settings_get(key: str, default: str='') -> str:
     f=G.mnt_dir/'.sd/bp_settings.json' if G.mnt_dir else None
@@ -2515,7 +3387,7 @@ def _bp_persistent_enabled() -> bool:
     return str(_bp_settings_get('persistent_blueprints','true')).lower() not in ('false','0')
 
 def _bp_autodetect_mode() -> str:
-    return _bp_settings_get('autodetect_blueprints','Home')
+    return _bp_settings_get('autodetect_blueprints','Disabled')
 
 def _bp_custom_paths_get() -> List[str]:
     v = _bp_settings_get('custom_paths','')
@@ -2537,10 +3409,16 @@ def _list_persistent_names() -> List[str]:
     if not _bp_persistent_enabled(): return []
     presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
     if not presets_dir or not presets_dir.is_dir(): return []
-    return [f.stem for f in presets_dir.glob('*.toml')]
+    found = []; seen = set()
+    for ext in ('*.container', '*.toml'):
+        for f in presets_dir.glob(ext):
+            if f.stem not in seen:
+                found.append(f.stem); seen.add(f.stem)
+    return found
 
 def _list_imported_names() -> List[str]:
-    """Autodetect .container / .toml files per autodetect mode."""
+    """Autodetect .container files per autodetect mode. Only .container ext to avoid
+    picking up unrelated .toml config files (pyprland, bottom, etc)."""
     mode = _bp_autodetect_mode()
     if mode == 'Disabled': return []
     search_dirs: List[Path] = []
@@ -2553,11 +3431,8 @@ def _list_imported_names() -> List[str]:
         depth = 3 if mode in ('Home','Custom') else 5
         for p in sd.rglob('*.container'):
             if str(p).count('/') - str(sd).count('/') <= depth:
+                if G.blueprints_dir and p.parent == G.blueprints_dir: continue
                 found.append(p.stem)
-        for p in sd.rglob('*.toml'):
-            if str(p).count('/') - str(sd).count('/') <= depth:
-                if p.parent != G.blueprints_dir:
-                    found.append(p.stem)
     return list(dict.fromkeys(found))  # dedup, preserve order
 
 def _get_imported_bp_path(name: str) -> Optional[Path]:
@@ -2567,21 +3442,33 @@ def _get_imported_bp_path(name: str) -> Optional[Path]:
     elif mode in ('Root','Everywhere'): search_dirs = [Path('/')]
     elif mode == 'Custom': search_dirs = [Path(p) for p in _bp_custom_paths_get() if Path(p).is_dir()]
     for sd in search_dirs:
-        for ext in ('*.container','*.toml'):
-            for p in sd.rglob(ext):
-                if p.stem == name and p.parent != G.blueprints_dir: return p
+        for p in sd.rglob('*.container'):
+            if p.stem == name and (not G.blueprints_dir or p.parent != G.blueprints_dir):
+                return p
     return None
 
 def _view_persistent_bp(name: str):
     presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
-    f = presets_dir/f'{name}.toml' if presets_dir else None
-    if not f or not f.exists(): pause(f"Persistent blueprint '{name}' not found."); return
+    if not presets_dir: return
+    f = next((presets_dir/f'{name}{ext}' for ext in ('.container','.toml')
+               if (presets_dir/f'{name}{ext}').exists()), None)
+    if not f: pause(f"Persistent blueprint '{name}' not found."); return
     fzf_run(f.read_text().splitlines(),
             header=f'{BLD}── [Persistent] {name}  {DIM}(read only){NC} ──{NC}',
             extra=['--no-multi','--disabled'])
 
+def _bp_find_file(name: str) -> Optional[Path]:
+    """Locate a blueprint file by stem, preferring .container over .toml."""
+    if not G.blueprints_dir: return None
+    for ext in ('.container', '.toml'):
+        f = G.blueprints_dir/f'{name}{ext}'
+        if f.exists(): return f
+    return None
+
 def _blueprint_submenu(name: str):
-    bp_file = G.blueprints_dir/f'{name}.toml'
+    bp_file = _bp_find_file(name)
+    if not bp_file:
+        pause(f"Blueprint file for '{name}' not found."); return
     while True:
         sel = menu(f'Blueprint: {name}', L['bp_edit'], L['bp_rename'], L['bp_delete'])
         if not sel:
@@ -2598,7 +3485,7 @@ def _blueprint_submenu(name: str):
             if not v: continue
             nn = re.sub(r'[^a-zA-Z0-9_\- ]','',v)
             if not nn: continue
-            new_f = G.blueprints_dir/f'{nn}.toml'
+            new_f = G.blueprints_dir/f'{nn}{bp_file.suffix}'
             if new_f.exists(): pause(f"Blueprint '{nn}' already exists."); continue
             bp_file.rename(new_f)
             pause(f"Renamed to '{nn}'."); return
@@ -2614,15 +3501,13 @@ def blueprints_submenu():
         bps = _list_blueprint_names()
         pbps = _list_persistent_names()
         ibps = _list_imported_names()
-        items = [f'{BLD}  ── Blueprints ───────────────────────{NC}']
-        for n in bps:  items.append(f'{DIM} ◈{NC}  {n}')
-        for n in pbps: items.append(f'{BLU} ◈{NC}  {n}  {DIM}[Persistent]{NC}')
-        for n in ibps: items.append(f'{CYN} ◈{NC}  {n}  {DIM}[Imported]{NC}')
+        items = []
+        for n in bps:  items.append(f' {DIM}◈  {n}{NC}')
+        for n in pbps: items.append(f' {BLU}◈{NC}  {n}  {DIM}[Persistent]{NC}')
+        for n in ibps: items.append(f' {CYN}◈{NC}  {n}  {DIM}[Imported]{NC}')
         if not bps and not pbps and not ibps:
             items.append(f'{DIM}  (no blueprints yet){NC}')
         items += [f'{GRN} +  {L["bp_new"]}{NC}',
-                  _sep('Settings') ,
-                  f'{DIM} ◈  Blueprint Settings{NC}',
                   _nav_sep(), _back_item()]
         hdr = (f'{BLD}── Blueprints ──{NC}  '
                f'{DIM}[{len(bps)} file · {len(pbps)} built-in · {len(ibps)} imported]{NC}')
@@ -2632,17 +3517,19 @@ def blueprints_submenu():
             return
         sc = clean(sel)
         if L['bp_new'] in sc:
+            if not G.blueprints_dir: pause('No image mounted.'); continue
             if not _guard_space(): continue
             v = finput('Blueprint name:')
-            if not v: continue
-            bname = re.sub(r'[^a-zA-Z0-9_\- ]','',v)
+            if v is None or not v.strip(): continue
+            bname = re.sub(r'[^a-zA-Z0-9_\- ]','',v).strip()
             if not bname: continue
-            bfile = G.blueprints_dir/f'{bname}.toml'
+            bfile = G.blueprints_dir/f'{bname}.container'
             if bfile.exists(): pause(f"Blueprint '{bname}' already exists."); continue
             bfile.write_text(bp_template())
-            pause(f"Blueprint '{bname}' created. Select it to edit.")
-        elif 'Blueprint Settings' in sc:
-            blueprints_settings_menu()
+            editor = os.environ.get('EDITOR','nano')
+            subprocess.run([editor, str(bfile)])
+            parsed = bp_parse(bfile.read_text()); errs = bp_validate(parsed)
+            if errs: pause('⚠  Blueprint has errors:\n\n'+'\n'.join(errs))
         elif '[Persistent]' in sc:
             pname = re.sub(r'^\s*◈\s*','',strip_ansi(sc)).split('[Persistent]')[0].strip()
             if pname: _view_persistent_bp(pname)
@@ -2720,6 +3607,7 @@ def ubuntu_menu():
     upkg_ok   = G.ubuntu_dir/'.upkg_ok'   if G.ubuntu_dir else Path('/tmp/.sd_upkg_ok')
     upkg_fail = G.ubuntu_dir/'.upkg_fail' if G.ubuntu_dir else Path('/tmp/.sd_upkg_fail')
     while True:
+        os.system('clear')
         # Check if Ubuntu op already running
         for sess,sfok,sffail,title in [
             ('sdUbuntuSetup', ok_f,   fail_f,   'Ubuntu setup'),
@@ -2779,7 +3667,8 @@ def ubuntu_menu():
             return
         sc = clean(sel)
         if sc.startswith('──'): continue
-        if 'Updates' in sc:
+        if sc.startswith('─'): continue
+        if 'Updates' in sc and 'Uninstall' not in sc:
             # Updates sub-menu
             upd_items = [
                 f'{BLD} ── Updates ─────────────────────────────{NC}',
@@ -2797,11 +3686,11 @@ def ubuntu_menu():
                 sync_pkgs = ' '.join(missing) if missing else DEFAULT_UBUNTU_PKGS
                 cmd = f'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {sync_pkgs} 2>&1'
                 _ubuntu_pkg_op('sdUbuntuPkg','Sync default pkgs',cmd)
-                G.ub_pkg_drift = False; G.ub_cache_loaded = True
+                G.ub_pkg_drift = False; G.ub_cache_loaded = False
             elif 'Update all pkgs' in sc2:
                 cmd = 'apt-get update && DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1'
                 _ubuntu_pkg_op('sdUbuntuPkg','Update all pkgs',cmd)
-                G.ub_has_updates = False; G.ub_cache_loaded = True
+                G.ub_has_updates = False; G.ub_cache_loaded = False
         elif 'Uninstall Ubuntu base' in sc:
             if confirm(f'{YLW}⚠  Uninstall Ubuntu base?{NC}\n\nThis wipes the Ubuntu chroot.\nAll containers that depend on it will stop working.'):
                 shutil.rmtree(str(G.ubuntu_dir), ignore_errors=True)
@@ -2809,11 +3698,11 @@ def ubuntu_menu():
                 pause('✓ Ubuntu base removed.'); return
         elif 'Add package' in sc:
             v = finput('Package name (e.g. ffmpeg, nodejs):')
-            if not v: continue
+            if v is None or not v.strip(): continue
             pkg_name = v.strip().replace(' ','')
             if not pkg_name: continue
             v2 = finput('Version (leave blank for latest):')
-            pkg_ver = (v2 or '').strip().replace(' ','')
+            pkg_ver = (v2 or '').strip().replace(' ','') if v2 is not None else ''
             apt_target = f'{pkg_name}={pkg_ver}' if pkg_ver else pkg_name
             cmd = (f'DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {apt_target} 2>&1'
                    f' || {{ apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {apt_target}; }}')
@@ -2835,6 +3724,7 @@ def ubuntu_menu():
 
 def _ensure_ubuntu():
     """Install ubuntu base in a tmux session — services/ubuntu.py"""
+    os.system('clear')
     ok_f  = G.ubuntu_dir/'.ub_ok'
     fail_f= G.ubuntu_dir/'.ub_fail'
     ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
@@ -2843,6 +3733,7 @@ def _ensure_ubuntu():
                                          suffix='.sh',delete=False,prefix='.sd_ubsetup_')
     with open(runner.name,'w') as f:
         f.write('#!/usr/bin/env bash\nset -e\n')
+        f.write('_chroot_bash(){ local r=$1; shift; local b=/bin/bash; [[ ! -f "$r/bin/bash" && ! -L "$r/bin/bash" && -f "$r/usr/bin/bash" ]] && b=/usr/bin/bash; sudo -n chroot "$r" "$b" "$@"; }\n')
         f.write('_sd_ub_arch=$(uname -m)\n')
         f.write('case "$_sd_ub_arch" in x86_64) _sd_ub_arch=amd64;; aarch64) _sd_ub_arch=arm64;; armv7l) _sd_ub_arch=armhf;; *) _sd_ub_arch=amd64;; esac\n')
         f.write('_base="https://cdimage.ubuntu.com/ubuntu-base/releases/noble/release/"\n')
@@ -2866,7 +3757,7 @@ def _ensure_ubuntu():
         f.write(f'printf \'#!/bin/sh\\nset -e\\napt-get update -qq\\nDEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends {DEFAULT_UBUNTU_PKGS} 2>&1\\n\' > "$_apt"\n')
         f.write(f'chmod +x "$_apt"\n')
         f.write(f'sudo -n mount --bind "$_apt" {ub!r}/tmp/.sd_ubinit.sh 2>/dev/null||cp "$_apt" {ub!r}/tmp/.sd_ubinit.sh\n')
-        f.write(f'sudo -n chroot {ub!r} bash /tmp/.sd_ubinit.sh\n')
+        f.write(f'_chroot_bash {ub!r} bash /tmp/.sd_ubinit.sh\n')
         f.write(f'sudo -n umount -lf {ub!r}/tmp/.sd_ubinit.sh {ub!r}/dev {ub!r}/sys {ub!r}/proc 2>/dev/null||true\n')
         f.write(f'rm -f "$_apt" {ub!r}/tmp/.sd_ubinit.sh 2>/dev/null||true\n')
         f.write(f'touch {ub!r}/.ubuntu_ready\n')
@@ -2969,12 +3860,14 @@ def _proxy_install_caddy_menu():
     """Launch Caddy + mDNS install in tmux session."""
     caddy_dest = _proxy_caddy_bin()
     caddy_dest.parent.mkdir(parents=True, exist_ok=True)
-    log = G.tmp_dir/f'.sd_caddy_log_{os.getpid()}'
+    ok_f  = G.tmp_dir/'.sd_caddy_ok'
+    fail_f= G.tmp_dir/'.sd_caddy_fail'
+    ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
     runner = tempfile.NamedTemporaryFile(mode='w',dir=str(G.tmp_dir),
                                          suffix='.sh',delete=False,prefix='.sd_caddy_inst_')
     with open(runner.name,'w') as f:
         f.write('#!/usr/bin/env bash\nset -uo pipefail\n')
-        f.write(f'exec > >(tee -a {log!r}) 2>&1\n')
+        f.write(f'_fail(){{ touch {fail_f!r}; exit 1; }}\n')
         f.write('printf "\\033[1m── Installing Caddy ──────────────────────────\\033[0m\\n"\n')
         f.write('case "$(uname -m)" in x86_64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;; armv7l) ARCH=armv7;; *) ARCH=amd64;; esac\n')
         f.write('VER=$(curl -fsSL --max-time 15 "https://api.github.com/repos/caddyserver/caddy/releases/latest" 2>/dev/null'
@@ -2982,21 +3875,27 @@ def _proxy_install_caddy_menu():
         f.write('[[ -z "$VER" ]] && VER="2.9.1"\n')
         f.write('TMPD=$(mktemp -d)\n')
         f.write('URL="https://github.com/caddyserver/caddy/releases/download/v${VER}/caddy_${VER}_linux_${ARCH}.tar.gz"\n')
-        f.write('curl -fsSL --max-time 120 "$URL" -o "$TMPD/caddy.tar.gz" || { printf "Download failed\\n"; exit 1; }\n')
+        f.write(f'curl -fsSL --max-time 120 "$URL" -o "$TMPD/caddy.tar.gz" || _fail caddy_install\n')
         f.write('tar -xzf "$TMPD/caddy.tar.gz" -C "$TMPD" caddy\n')
         f.write(f'mv "$TMPD/caddy" {caddy_dest!r}; chmod +x {caddy_dest!r}\n')
         f.write('rm -rf "$TMPD"\n')
         f.write(f'printf "%s ALL=(ALL) NOPASSWD: {caddy_dest}\\n" "$(id -un)" | sudo -n tee {_proxy_sudoers_path()!r} >/dev/null 2>/dev/null||true\n')
         f.write('sudo -n apt-get install -y avahi-utils 2>&1\n')
+        f.write(f'touch {ok_f!r}\n')
         f.write('printf "\\033[1;32m✓ Caddy + mDNS installed.\\033[0m\\n"\n')
+        f.write('sleep 1\n')  # let user read the output before auto-dismiss
     os.chmod(runner.name, 0o755)
-    sess = f'sdCaddyInst_{os.getpid()}'
+    sess = 'sdCaddyInst'
     if tmux_up(sess): _tmux('kill-session','-t',sess)
     _tmux('new-session','-d','-s',sess,f'bash {runner.name!r}; rm -f {runner.name!r}')
     _tmux('set-option','-t',sess,'detach-on-destroy','off')
-    # wait with attach option
-    _installing_wait_loop(sess, '/dev/null', '/dev/null', 'Install Caddy + mDNS')
+    _installing_wait_loop(sess, str(ok_f), str(fail_f), 'Install Caddy + mDNS')
     while tmux_up(sess): time.sleep(0.3)
+    ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
+    if _proxy_caddy_bin().exists():
+        pause(f'✓ Caddy installed successfully.')
+    else:
+        pause('✗ Caddy install failed. Select "Attach" next time to see output.')
 
 def proxy_menu():
     """services/caddy.py — full Caddy / reverse proxy menu"""
@@ -3094,7 +3993,7 @@ def proxy_menu():
         elif 'Add URL' in sc:
             if not G.CT_IDS: pause('No containers found.'); continue
             ctnames = [cname(c) for c in G.CT_IDS]
-            sel2 = fzf_run([f' {DIM}◈{NC}  {n}' for n in ctnames]+[_back_item()],
+            sel2 = fzf_run([f' {DIM}◈  {n}{NC}' for n in ctnames]+[_back_item()],
                            header=f'{BLD}── Add route ──{NC}  {DIM}Select container{NC}')
             if not sel2 or clean(sel2)==L['back']: continue
             sel_ct = clean(sel2).lstrip('◈').strip()
@@ -3143,7 +4042,7 @@ def proxy_menu():
                             if v: data2['routes'][ridx]['url']=v.strip()
                         elif 'Change container' in sel2:
                             ctnames2=[cname(c) for c in G.CT_IDS]
-                            sel3=fzf_run([f' {DIM}◈{NC}  {n}' for n in ctnames2]+[_back_item()],
+                            sel3=fzf_run([f' {DIM}◈  {n}{NC}' for n in ctnames2]+[_back_item()],
                                          header=f'{BLD}── Reassign route ──{NC}')
                             if sel3 and clean(sel3)!=L['back']:
                                 new_ct=clean(sel3).lstrip('◈').strip()
@@ -3264,7 +4163,7 @@ def active_processes_menu():
                     gpu_hdr = f'  ·  GPU:{parts[0]}%  VRAM:{parts[1]}/{parts[2]} MiB'
         r = _tmux('list-sessions','-F','#{session_name}', capture=True)
         sd_sessions = [s for s in r.stdout.splitlines()
-                       if re.match(r'^sd_[a-z0-9]{8}$|^sdInst_|^sdResize$|^sdTerm_|^sdAction_|^simpleDocker$', s)]
+                       if re.match(r'^sd_[a-z0-9]{8}$|^sdInst_|^sdCron_|^sdResize$|^sdTerm_|^sdAction_|^simpleDocker$', s)]
         display_lines = []; display_sess = []
         for sess in sd_sessions:
             cpu='-'; mem='-'; pid=''
@@ -3288,6 +4187,14 @@ def active_processes_menu():
                         mem = f'{rss//1024}M'
             stats = f'{DIM}CPU:{cpu:<6} RAM:{mem:<6}{NC}'
             if sess == 'simpleDocker':   label = 'simpleDocker  (UI)'
+            elif sess.startswith('sdCron_'):
+                m2 = re.match(r'^sdCron_([a-z0-9]+)_(\d+)$', sess)
+                if m2:
+                    cc,ci = m2.group(1),int(m2.group(2))
+                    crons = sj_get(cc,'crons') or []
+                    cname2 = crons[ci].get('name',f'cron_{ci}') if ci < len(crons) else f'cron_{ci}'
+                    label = f'Cron › {cname2}  ({cname(cc)})'
+                else: label = sess
             elif sess.startswith('sdInst_'):
                 icid = sess[len('sdInst_'):]
                 label = f'Install › {cname(icid)}'
@@ -3308,7 +4215,7 @@ def active_processes_menu():
             display_lines.append(f'  {label:<36} {stats}  PID:{pid or "-":<7}\t{sess}')
             display_sess.append(sess)
         if not display_lines: pause('No active processes.'); return
-        rows  = [_sep('Processes','38')] + display_lines + [_nav_sep(), _back_item()]
+        rows  = [_sep('Processes', 38)] + display_lines + [_nav_sep(), _back_item()]
         rsess = ['__sep__'] + display_sess + ['__sep__','__back__']
         sel = fzf_run(rows, header=f'{BLD}── Processes ──{NC}  {DIM}[{len(display_lines)} active]{NC}{gpu_hdr}',
                       with_nth='1', delimiter='\t')
@@ -3328,9 +4235,31 @@ def active_processes_menu():
 # ══════════════════════════════════════════════════════════════════════════════
 
 def resize_image():
-    """image/btrfs.py — interactive resize"""
+    """image/btrfs.py — interactive resize, extend or shrink (min = used * 1.1)
+    Matches .sh _resize_image exactly:
+      - Stops running containers first (with confirmation)
+      - Sentinel files in G.tmp_dir (unique, not /tmp/ hardcoded)
+      - LUKS re-open uses SD_VERIFICATION_CIPHER then passphrase prompt
+        (auth.key is inside the unmounted image — inaccessible during resize)
+    """
     if not G.img_path or not G.mnt_dir:
         pause('No image mounted.'); return
+
+    # ── #15: Stop running containers first — matches .sh ────────────────────
+    load_containers()
+    running_cts = [c for c in G.CT_IDS if tmux_up(tsess(c))]
+    if running_cts:
+        names = ', '.join(cname(c) for c in running_cts)
+        if not confirm(
+            f'Running services will be stopped:\n  {names}\n\n  Resize?'
+        ): return
+        for c in running_cts:
+            stop_ct(c)
+        # Also kill any install sessions
+        r2 = _tmux('list-sessions','-F','#{session_name}', capture=True)
+        for s in (r2.stdout.splitlines() if r2.returncode==0 else []):
+            if s.startswith('sdInst_'): _tmux('kill-session','-t',s)
+
     r = _run(['df','-k',str(G.mnt_dir)], capture=True)
     if r.returncode == 0:
         parts = r.stdout.splitlines()[-1].split()
@@ -3340,48 +4269,124 @@ def resize_image():
         total_gb = used_gb = 0
     cur_size_r = _run(['stat','--printf=%s',str(G.img_path)], capture=True)
     cur_gb = int(cur_size_r.stdout.strip())/(1<<30) if cur_size_r.returncode==0 else 0
-    v = finput(f'Current size: {cur_gb:.1f} GB  (used: {used_gb:.1f} GB)\n\n  Enter new size in GB (must be larger):')
+    import math
+    min_gb = round(used_gb * 1.1, 2) if used_gb > 0 else 0.1
+    min_gb = max(0.1, min_gb)
+    v = finput(
+        f'Current: {cur_gb:.1f} GB total · {used_gb:.1f} GB used\n'
+        f'  Minimum safe size: {min_gb} GB  (110% of used)\n\n'
+        f'  Enter new size in GB (extend or shrink):'
+    )
     if not v: return
-    try: new_gb = int(v.strip())
-    except: pause('Invalid size.'); return
-    if new_gb <= cur_gb:
-        pause(f'New size must be larger than current ({cur_gb:.0f} GB).'); return
-    if not confirm(f'Resize image to {new_gb} GB?\n\n  This will briefly unmount and remount the image.'): return
+    try: new_gb = float(v.strip())
+    except: pause('Invalid size — enter a number (e.g. 10 or 0.5).'); return
+    if new_gb <= 0:
+        pause('Size must be greater than 0.'); return
+    if new_gb < min_gb:
+        pause(f'Too small. Minimum is {min_gb} GB ({used_gb:.1f} GB used + 10%%).'); return
+    if abs(new_gb - cur_gb) < 0.05:
+        pause('Same size — nothing to do.'); return
+    action = 'shrink' if new_gb < cur_gb else 'extend'
+    if not confirm(
+        f'{action.capitalize()} image to {new_gb} GB?\n\n'
+        f'  Current: {cur_gb:.1f} GB  →  New: {new_gb} GB\n'
+        f'  The image will be briefly unmounted and remounted.'
+    ): return
     sess = 'sdResize'
     if tmux_up(sess): pause('A resize is already running.'); return
+    # ── #13: sentinel files in G.tmp_dir (unique) not /tmp/ hardcoded ─────
+    import uuid as _uuid
+    _uid = _uuid.uuid4().hex[:8]
+    ok_f   = G.tmp_dir / f'.sd_resize_ok_{_uid}'
+    fail_f = G.tmp_dir / f'.sd_resize_fail_{_uid}'
+    ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
+
     runner = tempfile.NamedTemporaryFile(mode='w',dir=str(G.tmp_dir),
                                          suffix='.sh',delete=False,prefix='.sd_resize_')
     img = str(G.img_path); mnt = str(G.mnt_dir)
     is_luks = img_is_luks(G.img_path)
     mapper = luks_mapper(G.img_path) if is_luks else ''
+    # ── #14: LUKS re-open uses SD_VERIFICATION_CIPHER (always in memory) ───
+    # auth.key is inside the unmounted image — inaccessible during resize.
+    # Shell uses $SD_VERIFICATION_CIPHER first, then saved passphrase, then prompt.
+    auto_pass = G.verification_cipher
     with open(runner.name,'w') as f:
-        f.write('#!/usr/bin/env bash\nset -e\n')
-        f.write(f'printf "Unmounting {mnt}...\\n"\n')
-        f.write(f'sudo -n umount -lf {mnt!r}\n')
-        if is_luks:
-            f.write(f'sudo -n cryptsetup close {mapper!r} 2>/dev/null||true\n')
-        f.write(f'_lo=$(sudo -n losetup -j {img!r} | cut -d: -f1 | head -1)\n')
-        f.write('[ -n "$_lo" ] && sudo -n losetup -d "$_lo"\n')
-        f.write(f'printf "Resizing {img} to {new_gb}G...\\n"\n')
-        f.write(f'truncate -s {new_gb}G {img!r}\n')
-        f.write('printf "Reattaching loop...\\n"\n')
+        f.write('#!/usr/bin/env bash\n')
+        f.write(f'_ok_f={str(ok_f)!r}\n')
+        f.write(f'_fail_f={str(fail_f)!r}\n')
+        f.write('_finish(){ local c=$?; [[ $c -eq 0 ]] && touch "$_ok_f" || touch "$_fail_f"; }\n')
+        f.write('trap _finish EXIT\n')
+        f.write('trap \'touch "$_fail_f"; exit 130\' INT TERM\n')
+        f.write('set -e\n')
+        f.write(f'printf "\\033[1mResize: {action} to {new_gb} GB\\033[0m\\n"\n')
+        new_bytes = int(new_gb * (1 << 30))
+        if action == 'shrink':
+            f.write(f'printf "Shrinking BTRFS filesystem...\\n"\n')
+            f.write(f'sudo -n btrfs filesystem resize {new_bytes} {mnt!r}\n')
+            f.write(f'printf "Syncing...\\n"\n')
+            f.write(f'sudo -n btrfs filesystem sync {mnt!r} 2>/dev/null || true\n')
+            f.write(f'printf "Unmounting...\\n"\n')
+            f.write(f'sudo -n umount -lf {mnt!r}\n')
+            if is_luks:
+                f.write(f'sudo -n cryptsetup close {mapper!r} 2>/dev/null || true\n')
+            f.write(f'_lo=$(sudo -n losetup -j {img!r} 2>/dev/null | cut -d: -f1 | head -1)\n')
+            f.write('[ -n "$_lo" ] && sudo -n losetup -d "$_lo"\n')
+            f.write(f'printf "Truncating image file to {new_gb}G...\\n"\n')
+            f.write(f'truncate -s {new_bytes} {img!r}\n')
+        else:
+            f.write(f'printf "Syncing...\\n"\n')
+            f.write(f'sudo -n btrfs filesystem sync {mnt!r} 2>/dev/null || true\n')
+            f.write(f'printf "Unmounting...\\n"\n')
+            f.write(f'sudo -n umount -lf {mnt!r}\n')
+            if is_luks:
+                f.write(f'sudo -n cryptsetup close {mapper!r} 2>/dev/null || true\n')
+            f.write(f'_lo=$(sudo -n losetup -j {img!r} 2>/dev/null | cut -d: -f1 | head -1)\n')
+            f.write('[ -n "$_lo" ] && sudo -n losetup -d "$_lo"\n')
+            f.write(f'printf "Extending image file to {new_gb}G...\\n"\n')
+            f.write(f'truncate -s {new_bytes} {img!r}\n')
+        f.write(f'printf "Reattaching loop device...\\n"\n')
         f.write(f'_lo2=$(sudo -n losetup --find --show {img!r})\n')
         if is_luks:
-            f.write(f'sudo -n cryptsetup resize {mapper!r} --key-file=- <<< "{SD_DEFAULT_KEYWORD}" 2>/dev/null || true\n')
+            f.write(f'printf "Opening LUKS...\\n"\n')
+            # Try SD_VERIFICATION_CIPHER first (machine-derived, always available on host).
+            # Fall back to SD_DEFAULT_KEYWORD if system-agnostic slot exists.
+            # Finally prompt for passphrase — mirrors shell resize script exactly.
+            f.write(f'_opened=0\n')
+            f.write(f'printf %s {auto_pass!r} | sudo -n cryptsetup open --key-file=- "$_lo2" {mapper!r} && _opened=1 || true\n')
+            f.write(f'if [ "$_opened" -eq 0 ]; then\n')
+            f.write(f'  printf %s {SD_DEFAULT_KEYWORD!r} | sudo -n cryptsetup open --key-file=- "$_lo2" {mapper!r} && _opened=1 || true\n')
+            f.write(f'fi\n')
+            f.write(f'if [ "$_opened" -eq 0 ]; then\n')
+            f.write(f'  for _try in 1 2 3; do\n')
+            f.write(f'    printf "Passphrase for LUKS image: "; read -rs _pp; printf "\\n"\n')
+            f.write(f'    printf %s "$_pp" | sudo -n cryptsetup open --key-file=- "$_lo2" {mapper!r} && {{ _opened=1; break; }} || true\n')
+            f.write(f'    printf "Wrong passphrase.\\n"\n')
+            f.write(f'  done\n')
+            f.write(f'fi\n')
+            f.write(f'[ "$_opened" -eq 0 ] && {{ printf "Failed to open LUKS image.\\n"; exit 1; }}\n')
+            f.write(f'sudo -n cryptsetup resize {mapper!r}\n')
             f.write(f'_dev=/dev/mapper/{mapper}\n')
         else:
             f.write('_dev="$_lo2"\n')
-        f.write(f'sudo -n mount -t btrfs "$_dev" {mnt!r}\n')
-        f.write(f'sudo -n btrfs filesystem resize max {mnt!r}\n')
-        f.write(f'printf "\\033[0;32m✓ Resize complete.\\033[0m\\n"\n')
+        f.write(f'printf "Remounting...\\n"\n')
+        f.write(f'sudo -n mount -t btrfs -o compress=zstd "$_dev" {mnt!r}\n')
+        if action == 'extend':
+            f.write(f'printf "Resizing BTRFS filesystem...\\n"\n')
+            f.write(f'sudo -n btrfs filesystem resize max {mnt!r}\n')
+        f.write(f'printf "\\033[0;32m✓ Resize to {new_gb} GB complete.\\033[0m\\n"\n')
     os.chmod(runner.name, 0o755)
     _tmux('new-session','-d','-s',sess,f'bash {runner.name!r}; rm -f {runner.name!r}')
     _tmux('set-option','-t',sess,'detach-on-destroy','off')
-    _installing_wait_loop(sess, '/dev/null', '/dev/null', 'Resize image')
+    _installing_wait_loop(sess, str(ok_f), str(fail_f), 'Resize image')
     while tmux_up(sess): time.sleep(0.3)
-    # Re-init dirs after remount
+    # Check result before cleanup — matches shell sentinel-file pattern
+    resize_ok = ok_f.exists()
+    ok_f.unlink(missing_ok=True); fail_f.unlink(missing_ok=True)
     set_img_dirs()
-    pause('Resize complete.')
+    if resize_ok:
+        pause(f'Resize to {new_gb} GB complete.')
+    else:
+        pause('Resize failed. Attach to sdResize or check logs.')
 
 # ══════════════════════════════════════════════════════════════════════════════
 # menus/help.py — Other / help menu
@@ -3389,8 +4394,9 @@ def resize_image():
 
 def help_menu():
     """menus/help.py — the Other / ? menu"""
+    # Read ubuntu cache once per menu open (non-blocking if already loaded)
+    ub_cache_read()
     while True:
-        ub_cache_read()
         if G.ubuntu_dir and (G.ubuntu_dir/'.ubuntu_ready').exists():
             ubuntu_status = f'{GRN}ready{NC}  {CYN}[P]{NC}'
             if G.ub_pkg_drift or G.ub_has_updates:
@@ -3398,7 +4404,6 @@ def help_menu():
         else:
             ubuntu_status = f'{YLW}not installed{NC}'
         proxy_s = f'{GRN}running{NC}' if proxy_running() else f'{DIM}stopped{NC}'
-        # QRencode
         qr_installed = bool(G.ubuntu_dir and (G.ubuntu_dir/'.ubuntu_ready').exists()
                             and _run(['sudo','-n','chroot',str(G.ubuntu_dir),'sh','-c',
                                       'command -v qrencode'], capture=True).returncode==0)
@@ -3419,22 +4424,19 @@ def help_menu():
             _sep('Caution'),
             f'{DIM} ≡  View logs{NC}',
             f'{DIM} ⊘  Clear cache{NC}',
-            f'{DIM} ↕  Resize image{NC}',
-        ]
-        if G.img_path and img_is_luks(G.img_path):
-            items.append(f'{DIM} ⚷  Manage Encryption{NC}')
-        items += [
-            f'{DIM} ×  Delete image file{NC}',
+            f'{DIM} ▷  Resize image{NC}',
+            f'{DIM} ⚷  Manage Encryption{NC}',
+            f' {RED}×{NC}{DIM}  Delete image file{NC}',
             _nav_sep(), _back_item(),
         ]
-        sel = fzf_run(items, header=f'{BLD}── {L["help"]} ──{NC}')
+        sel = fzf_run(items, header=f'{BLD}── {L["help"]} ──{NC}  {DIM}Ubuntu:{NC}  {ubuntu_status}  {DIM}Proxy:{NC}  {proxy_s}')
         if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
         sc = clean(sel)
         if   'Profiles & data' in sc:  persistent_storage_menu()
         elif 'Backups' in sc:          _global_backups_menu()
-        elif sc == 'Blueprints':       blueprints_submenu()
+        elif 'Blueprints' in sc and 'preset' not in sc: blueprints_settings_menu()
         elif 'Ubuntu base' in sc:      ubuntu_menu()
         elif 'Caddy' in sc:            proxy_menu()
         elif 'QRencode' in sc:         _qrencode_menu()
@@ -3446,23 +4448,35 @@ def help_menu():
                     extra=['--no-multi','--disabled'])
         elif 'View logs' in sc:        logs_browser()
         elif 'Clear cache' in sc:
-            if confirm('Clear size/version cache?\n\n  This is harmless; caches will rebuild automatically.'):
-                shutil.rmtree(str(G.cache_dir), ignore_errors=True)
-                G.cache_dir.mkdir(parents=True, exist_ok=True)
+            if confirm('Clear all cached data?'):
+                shutil.rmtree(str(G.cache_dir/'sd_size'), ignore_errors=True)
+                shutil.rmtree(str(G.cache_dir/'gh_tag'), ignore_errors=True)
+                (G.cache_dir/'sd_size').mkdir(parents=True, exist_ok=True)
+                (G.cache_dir/'gh_tag').mkdir(parents=True, exist_ok=True)
                 pause('Cache cleared.')
         elif 'Resize image' in sc:     resize_image()
         elif 'Manage Encryption' in sc:
             if G.img_path and img_is_luks(G.img_path): enc_menu()
             else: pause('Image is not encrypted.')
         elif 'Delete image file' in sc:
-            if confirm(f'⚠  Permanently delete {G.img_path}?\n\n  This removes ALL data — containers, installations, storage.\n  This cannot be undone.'):
-                if confirm('SECOND CONFIRMATION — are you absolutely sure?'):
-                    img = G.img_path
-                    unmount_img()
-                    try: img.unlink()
-                    except Exception as e: pause(f'Failed: {e}'); continue
-                    pause(f'Image deleted. Exiting.')
-                    sys.exit(0)
+            if not G.img_path: pause('No image currently loaded.'); continue
+            img_name = G.img_path.name; img_save = G.img_path
+            if not confirm(f'PERMANENTLY DELETE IMAGE?\n\n  File: {img_name}\n  Path: {img_save}\n\n  THIS CANNOT BE UNDONE!'): continue
+            load_containers()
+            for cid2 in G.CT_IDS:
+                sess2 = tsess(cid2)
+                if tmux_up(sess2):
+                    _tmux('send-keys','-t',sess2,'C-c',''); time.sleep(0.3)
+                    _tmux('kill-session','-t',sess2)
+            r2 = _tmux('list-sessions','-F','#{session_name}', capture=True)
+            for s in (r2.stdout.splitlines() if r2.returncode==0 else []):
+                if s.startswith('sdInst_'): _tmux('kill-session','-t',s)
+            tmux_set('SD_INSTALLING','')
+            unmount_img()
+            try: img_save.unlink()
+            except Exception as e: pause(f'Failed: {e}'); continue
+            pause(f'✓ Image deleted: {img_name}\n\n  Select or create a new image.')
+            setup_image(); return
 
 def _global_backups_menu():
     """All containers with backups — menus/help.py"""
@@ -3514,13 +4528,16 @@ def _qrencode_menu():
 
 def quit_menu():
     """menus/main_menu.py"""
-    sel = fzf_run([f'{DIM}{L["detach"]}{NC}', f'{RED}{L["quit_stop_all"]}{NC}'],
-                  header=f'{BLD}── {L["quit"]} ──{NC}')
+    sel = fzf_run(
+        [f'{DIM}⊙  {L["detach"]}{NC}', f'{RED}■  {L["quit_stop_all"]}{NC}'],
+        header=f'{BLD}── {L["quit"]} ──{NC}\n{DIM}  Detach leaves everything running in background.{NC}'
+    )
     if not sel: return
     sc = strip_ansi(sel).strip()
-    if L['detach'] in sc or '⊙' in sc:
-        tmux_set('SD_DETACH','1'); _tmux('detach-client')
-    elif L['quit_stop_all'] in sc or '■' in sc:
+    if '⊙' in sc or L['detach'] in sc:
+        tmux_set('SD_DETACH','1')
+        _tmux('detach-client')
+    elif '■' in sc or L['quit_stop_all'] in sc:
         quit_all()
 
 def quit_all():
@@ -3553,8 +4570,20 @@ def main_menu():
         load_containers()
         n_running = sum(1 for c in G.CT_IDS if tmux_up(tsess(c)))
         n_ct = len(G.CT_IDS)
-        n_grp = len(_list_groups())
-        n_bp  = len(_list_blueprint_names()) + len(_list_persistent_names()) + len(_list_imported_names())
+        gids  = _list_groups()
+        n_grp = len(gids)
+        # Count groups with at least one running container — matches .sh grp_n_active
+        grp_n_active = sum(
+            1 for gid in gids
+            if any(
+                _ct_id_by_name(mn) and tmux_up(tsess(_ct_id_by_name(mn)))
+                for mn in _grp_containers(gid)
+            )
+        )
+        n_bp  = len(_list_blueprint_names()) + len(_list_persistent_names())
+        # Only count imported if autodetect is enabled (avoids slow rglob on every render)
+        if _bp_autodetect_mode() != 'Disabled':
+            n_bp += len(_list_imported_names())
         # Image label
         img_label = ''
         if G.img_path and G.mnt_dir:
@@ -3565,7 +4594,7 @@ def main_menu():
                 img_label = f'  {DIM}{G.img_path.stem}  [{used_gb:.1f}/{total_gb:.1f} GB]{NC}'
         items = [
             f' {GRN}◈{NC}  Containers  {DIM}[{n_ct} · {GRN}{n_running} ▶{NC}{DIM}]{NC}',
-            f' {CYN}▶{NC}  Groups  {DIM}[{n_grp} active]{NC}',
+            f' {CYN}▶{NC}  Groups  {DIM}[{grp_n_active} active/{n_grp}]{NC}',
             f' {BLU}◈{NC}  Blueprints  {DIM}[{n_bp}]{NC}',
             f'{DIM}─────────────────────────────────────────{NC}',
             f' {DIM}?  {L["help"]}{NC}',
@@ -3576,10 +4605,10 @@ def main_menu():
             f'--bind={KB["quit"]}:execute-silent(tmux set-environment -g SD_QUIT 1)+abort',
         ])
         if sel is None:
+            if G.usr1_fired: G.usr1_fired = False; continue
             if tmux_get('SD_QUIT') == '1':
-                tmux_set('SD_QUIT','0'); quit_menu(); continue
-            quit_all()
-            continue
+                tmux_set('SD_QUIT','0')
+            quit_menu(); continue
         sc = clean(sel)
         if   'Containers' in sc:  containers_submenu()
         elif 'Groups' in sc:      groups_menu()
@@ -3593,33 +4622,44 @@ def main_menu():
 
 def _bootstrap_tmux():
     """Outer shell: create tmux session if needed, then re-attach loop.
-    Inner process detected via SD_INNER=1 env var — returns immediately."""
-    if os.environ.get('SD_INNER') == '1':
+    Inner process detected via SD_INNER=1 env var OR $TMUX being set (already inside tmux).
+    Matches .sh which uses [[ -z "$TMUX" ]] to detect the outer shell."""
+    if os.environ.get('SD_INNER') == '1' or os.environ.get('TMUX'):
         return  # inner process — skip outer bootstrap
     me = os.path.abspath(sys.argv[0])
     if not shutil.which('tmux'):
         print(f'{RED}✗  tmux is required but not found.{NC}'); sys.exit(1)
-    # Write sudoers only once (outer shell has a real tty for password prompt)
+    # Write sudoers and validate credentials — matches shell _sd_outer_sudo exactly.
+    # Shell always: sudo -k (invalidate cache), then sudo -v (prompt with retry).
+    # We must do this every launch so a revoked/changed password is caught immediately.
     sudoers = f'/etc/sudoers.d/simpledocker_{os.popen("id -un").read().strip()}'
     if not os.path.exists(sudoers):
+        # First run: full write_sudoers (prompts for password, writes NOPASSWD rule)
         write_sudoers()
+    else:
+        # Subsequent runs: invalidate cached ticket and re-validate (mirrors sudo -k && sudo -v)
+        subprocess.run(['sudo','-k'], capture_output=True)
+        while subprocess.run(['sudo','-v']).returncode != 0:
+            print(f'  {RED}Incorrect password.{NC} Try again.\n')
     sess = 'simpleDocker'
-    # Kill any existing simpleDocker session — this ensures a clean startup each time.
-    # The inner process (SD_INNER=1) does cleanup via signal handlers; killing the session
-    # here lets sweep_stale (run inside the new inner process) reclaim stale mounts.
+    # Match .sh exactly: only kill if session exists but SD_READY≠1 (stuck/crashed)
     if tmux_up(sess):
-        # If the session is ready, give it a moment to unmount cleanly via kill-session
-        subprocess.run(['tmux','kill-session','-t',sess], capture_output=True)
-        time.sleep(0.5)
-    # Create new session
-    cmd = f'env SD_INNER=1 python3 {me!r}'
-    r = subprocess.run(
-        ['tmux','new-session','-d','-s',sess,'-x','220','-y','50',cmd],
-        capture_output=True)
-    if r.returncode != 0:
-        print(f'{RED}✗  Failed to create tmux session:{NC}', r.stderr.decode().strip())
-        sys.exit(1)
-    subprocess.run(['tmux','set-option','-t',sess,'status','off'], capture_output=True)
+        r_ready = subprocess.run(
+            ['tmux','show-environment','-t',sess,'SD_READY'],
+            capture_output=True, text=True)
+        if r_ready.stdout.strip() != 'SD_READY=1':
+            subprocess.run(['tmux','kill-session','-t',sess], capture_output=True)
+            time.sleep(0.5)
+    # Create session if not running
+    if not tmux_up(sess):
+        cmd = f'env SD_INNER=1 python3 {me!r}'
+        r = subprocess.run(
+            ['tmux','new-session','-d','-s',sess,'-x','220','-y','50',cmd],
+            capture_output=True)
+        if r.returncode != 0:
+            print(f'{RED}✗  Failed to create tmux session:{NC}', r.stderr.decode().strip())
+            sys.exit(1)
+        subprocess.run(['tmux','set-option','-t',sess,'status','off'], capture_output=True)
     # Give inner process a moment to start
     time.sleep(0.3)
     # Re-attach loop: keep attaching until user deliberately detaches (SD_DETACH=1)
@@ -3628,12 +4668,18 @@ def _bootstrap_tmux():
     while tmux_up(sess):
         subprocess.run(['tmux','attach-session','-t',sess])
         os.system('stty sane 2>/dev/null')
-        # Flush any remaining terminal input (mirrors bash drain loop)
+        # Drain buffered stdin — mirrors the shell's:
+        #   while IFS= read -r -t 0.1 -n 256 _ 2>/dev/null; do :; done
         try:
-            import termios, tty
-            old = termios.tcgetattr(sys.stdin.fileno())
-            tty.setraw(sys.stdin.fileno())
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, old)
+            import termios, select
+            fd = sys.stdin.fileno()
+            # Flush kernel tty input buffer via tcflush, then drain any remaining
+            try: termios.tcflush(fd, termios.TCIFLUSH)
+            except: pass
+            # Read-discard loop: consume anything left in the Python/OS buffer
+            while select.select([sys.stdin], [], [], 0.05)[0]:
+                try: os.read(fd, 256)
+                except: break
         except: pass
         os.system('clear')
         if tmux_get('SD_DETACH') == '1':
@@ -3673,6 +4719,8 @@ def _force_quit():
     except: pass
     try: unmount_img()
     except: pass
+    try: shutil.rmtree(str(G.sd_mnt_base), ignore_errors=True)
+    except: pass
     os.system('clear')
     _tmux('kill-session','-t','simpleDocker')
     sys.exit(0)
@@ -3698,12 +4746,30 @@ def _check_btrfs_kernel():
             sys.exit(1)
 
 if __name__ == '__main__':
-    # ── Dep check ──────────────────────────────────────────────────────────────
-    if not check_deps('no'):
-        print(f'\n{RED}Missing dependencies:{NC}')
-        missing = [t for t in REQUIRED_TOOLS if not shutil.which(t)]
-        for m in missing: print(f'  ✗  {m}')
-        print(f'\nInstall with:\n  sudo apt-get install {" ".join(missing)}')
+    # ── Dependency check — runs BEFORE anything else ───────────────────────────
+    _missing_deps = [t for t in REQUIRED_TOOLS if not shutil.which(t)]
+    if _missing_deps:
+        _pkg_map = {
+            'btrfs':  'btrfs-progs',
+            'ip':     'iproute2',
+            'fzf':    'fzf',
+            'tmux':   'tmux',
+            'jq':     'jq',
+            'yazi':   'yazi',         # may need cargo / external repo on some distros
+            'sudo':   'sudo',
+            'curl':   'curl',
+        }
+        _apt_pkgs  = [_pkg_map.get(t, t) for t in _missing_deps]
+        _pacman_pkgs = [('btrfs-progs' if t == 'btrfs' else ('iproute2' if t == 'ip' else t)) for t in _missing_deps]
+        print(f'\n{BLD}── simpleDocker ──{NC}')
+        print(f'\n{RED}  ✗  Missing required tools:{NC}\n')
+        for t in _missing_deps:
+            print(f'      {BLD}{t}{NC}  {DIM}→  {_pkg_map.get(t, t)}{NC}')
+        print(f'\n{DIM}  Install with one of:{NC}\n')
+        print(f'    {BLD}apt{NC}     sudo apt-get install {" ".join(_apt_pkgs)}')
+        print(f'    {BLD}pacman{NC}  sudo pacman -S {" ".join(_pacman_pkgs)}')
+        print(f'    {BLD}dnf{NC}     sudo dnf install {" ".join(_apt_pkgs)}')
+        print(f'\n{DIM}  Note: yazi may need a separate install — see https://yazi-rs.github.io{NC}\n')
         sys.exit(1)
 
     _check_btrfs_kernel()
@@ -3713,6 +4779,8 @@ if __name__ == '__main__':
     _bootstrap_tmux()
 
     # ── Inside the simpleDocker tmux session from here ─────────────────────────
+    os.system('stty -ixon 2>/dev/null || true')   # disable flow control (ctrl-s/ctrl-q)
+    _tmux('bind-key','-n','C-\\','detach-client')  # ctrl-\ detaches inside tmux
     signal.signal(signal.SIGUSR1, _signal_handler)
     signal.signal(signal.SIGINT,  _quit_signal_handler)
     signal.signal(signal.SIGTERM, _quit_signal_handler)
