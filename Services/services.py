@@ -163,23 +163,22 @@ def tmux_get(key: str) -> str:
 def tmux_set(key: str, val: str):
     _tmux('set-environment','-g',key,val)
 
-def tmux_launch(sess: str, cmd: str, *, log: bool = True, detach_on_destroy: bool = True):
-    """Generalized tmux session launcher. Logs to G.tmp_dir/{sess}.log inside image if log=True."""
+def tmux_launch(sess: str, cmd: str, *, detach_on_destroy: bool = True):
+    """Generalized tmux session launcher. Always logs to <img>/Logs/<sess>.log if img is mounted."""
     import sys as _sys
     _dbg = '--debug' in _sys.argv
     if tmux_up(sess): _tmux('kill-session','-t',sess)
-    # Wrap cmd with set -x trace if --debug (applies to every tmux session)
     if _dbg:
         full = f'bash -c \'set -x; exec "$@"\' -- bash -c {cmd!r}'
     else:
         full = cmd
-    if log and G.tmp_dir:
-        G.tmp_dir.mkdir(parents=True, exist_ok=True)
-        lf = str(G.tmp_dir/f'{sess}.log')
-        full = f'({full}) 2>&1 | tee -a {lf!r}; tmux kill-session -t {sess!r} 2>/dev/null||true'
     _tmux('new-session','-d','-s',sess, full)
     if detach_on_destroy:
         _tmux('set-option','-t',sess,'detach-on-destroy','off')
+    if G.logs_dir:
+        G.logs_dir.mkdir(parents=True, exist_ok=True)
+        lf = str(G.logs_dir/f'{sess}.log')
+        _tmux('pipe-pane','-t',sess, f'cat >> {lf!r}')
 
 def tsess(cid: str) -> str: return f'sd_{cid}'
 def inst_sess(cid: str) -> str: return f'sdInst_{cid}'
@@ -1650,7 +1649,7 @@ def start_ct(cid: str, mode='background', profile_cid: str=''):
             if rc.get('mem_swap'):   sr += f' -p MemorySwapMax={rc["mem_swap"]}'
             if rc.get('cpu_weight'): sr += f' -p CPUWeight={rc["cpu_weight"]}'
             run_cmd = f'{sr} -- bash -c {base_cmd!r}'
-    tmux_launch(sess, f'({run_cmd}) 2>&1 | tee -a {_start_lf!r}', log=False)
+    tmux_launch(sess, f'({run_cmd}) 2>&1 | tee -a {_start_lf!r}')
     # Background watcher: fire SIGUSR1 to refresh UI when container session ends (DIV-004)
     def _ct_watcher(s=sess):
         while G.running and tmux_up(s):
@@ -1733,9 +1732,7 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
         f.write('#!/usr/bin/env bash\n')
         f.write(f'_secs={secs}\n')
         f.write(f'_cron_next_file={next_file!r}\n')
-        if _log and ip:
-            _log_dir = str(os.path.dirname(os.path.join(str(ip), _log)))
-            f.write(f'mkdir -p {_log_dir!r}\n')
+
         if unjailed:
             f.write(f'export CONTAINER_ROOT={ip!r}\n')
             f.write('while true; do\n')
@@ -1782,18 +1779,14 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
                 f'mount --bind /dev {str(ip)}/dev 2>/dev/null||true',
                 f'sudo -n chroot {str(ip)} /bin/bash {_inner_chroot}',
             ])
-            if _log and ip:
-                _log_host = str(ip)+'/'+_log
-                f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__ 2>&1 | tee -a {_log_host!r}\n')
-            else:
-                f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__\n')
+            f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__\n')
             f.write(f'    _cron_next_ts=$(( $(date +%s) + _secs ))\n')
             f.write('    _cron_next_time=$(date -d "@$_cron_next_ts" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)\n')
             f.write('    _cron_next_date=$(date -d "@$_cron_next_ts" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)\n')
             f.write('    printf "\\n\\033[2mDone. Next execution: %s [%s]\\033[0m\\n" "$_cron_next_time" "$_cron_next_date"\n')
             f.write('done\n')
     os.chmod(runner.name, 0o755)
-    tmux_launch(sname, f'bash {runner.name}; rm -f {runner.name}', log=False)
+    tmux_launch(sname, f'bash {runner.name}; rm -f {runner.name}')
 
 def _cr_prefix(val: str) -> str:
     """$root=$CONTAINER_ROOT, $out/p=host /p, $out~/p=host ~/p, else prefix with $CONTAINER_ROOT."""
@@ -2534,7 +2527,7 @@ def launch_job(sess: str, title: str, cmd: str,
         full_cmd = f'{cmd} 2>&1 | tee -a {tmp_lf!r}'
     else:
         full_cmd = cmd
-    tmux_launch(sess, full_cmd, log=False)  # logging handled above via tee
+    tmux_launch(sess, full_cmd)  # logging handled above via tee
     if 'Attach' in strip_ansi(sel):
         _tmux('switch-client', '-t', sess)
     # Background: return immediately — caller menu redraws, job runs silently
@@ -3570,7 +3563,7 @@ def _open_in_submenu(cid: str):
             sess = f'sdTerm_{cid}'
             tip = str(ct_path) if ct_path else str(Path.home())
             if not tmux_up(sess):
-                tmux_launch(sess, f'cd {tip!r} && exec bash', log=False)
+                tmux_launch(sess, f'cd {tip!r} && exec bash')
             pause(f"Opening terminal for '{n}'\n\n  {tip}\n  Press {KB['tmux_detach']} to detach.")
             _tmux('switch-client','-t',sess)
 
@@ -3893,7 +3886,7 @@ def _run_action(cid: str, ai: int, label: str, dsl: str):
                  f'printf "Press Enter to return...\\n"; read -rs _; '
                  f'tmux switch-client -t simpleDocker 2>/dev/null||true; '
                  f'tmux kill-session -t {sess!r} 2>/dev/null||true')
-        tmux_launch(sess, inner, log=False)
+        tmux_launch(sess, inner)
         _tmux('switch-client','-t',sess)
 
 # ══════════════════════════════════════════════════════════════════════════════
