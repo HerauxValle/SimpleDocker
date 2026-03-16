@@ -1,0 +1,39 @@
+---
+Current stuff
+---
+1.  Entering "Other" menu still does load 3 to 4 seconds. Maybe something is being cached? fix please
+2.  CtrC and CtrQ should not "Error" the python script
+3.  Make sure the entire script is system agnostic (on linux distros)
+4.  Every tmux session should produce one log file inside the tmp dir inside the img. Please also check if the tmux attatch and background and tmux in general is ONE function so its generalized with args
+5.  Caddy/Qrencode fails installing. Caddy should same as qrencode depend on ubuntu (ONLY IF CADDY IS BEING INSTALLED VIA A PKGMG!!!)
+6.  Installation of containers fails, chroot bash issue
+7.  Resize does not use the auth.key file. Also it should handle already existing mounts like the one in the log grazefully, clear, autoremount or smth else
+8.  Quitting via ctrC out of tmux sesson fails to clear the previous menus fzf menu session
+---
+Prev. alledgedly fixed fixes:
+---
+1.  Auth key rotation happens in slot 8 and 9, should happen not in the ones reserved for Passkeys/Verified systems (under slot min and slot max, 7-31)
+2.  Entering "Other" menu loads 3 seconds on first entry after mount
+3.  Installing ubuntu base shows the log "usr/bin/bash cannot execute bin. file" after "Extracting.."
+4.  Does not install all default pkgs: curl git wget ca-certificates zstd tar xz-utils python3 python3-venv python3-pip build-essential
+5.  The used tmux dialogue is the "Attatch or run in background". There are a lot of fragments of the old "Attatch to installation" one. Remove those.
+6.  Ubuntu base > Updates both has the issue mentioned in 5. where it shows the new dialogue first then the old and freezes the terminal for 4 sec then returns
+7.  Adding a passkey in "Add key" in encryption does always faile. After "Continue" is pressed the enter passkey doalogue with like stairs indented and fails after
+8.  Caddy fails installation after it gets the git, tmux session gets killed but it still is "uninstalled", make sure mdns and all other req. things are also installed
+9.  Qrencode installation dialogue does not follow the standart and also has the issue mentioned with the old install doalogue, also always fails and header "Install QRencode does not get cleared", after leaving the "Install" menu it waits 3 seconds
+10. Resizing does still ask for Passphrase but should use the keyfile inside the .img (the keyfile should be there to verify all actions after mounting),
+more bugs follow but 10 are enough for now
+
+---
+Those apply always:
+---
+Goal:   The goal was to rewrite the services.sh (in the gist https://gist.github.com/HerauxValle/45b403ff5abc6712e674746725d0e017) to a 1:1 (or improved) version in services.py but right now displays work but mostly all functionalities are broken.
+        If you are unsure about any changes please do check the code in the gist.
+
+Important:  For everything be as token efficient and tool efficient as possible while acting as smart as possible
+            If you are unsure about anything please ask the user to send screenshots or provide more details (you ask specific questions that help you solve the problem)
+            The user has the old .sh script and you can request a .md with an overview of the old sh and screenshots how the old interface was orchestrated.
+            It is supported to question rather than guess.
+            Also always copy all script files like the .py or other files to your workspace
+
+Other:  If you can generalize functions please do so (if one functionality is used several times it should not be copy pasted each time)

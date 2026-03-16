@@ -1,0 +1,112 @@
+    local ubuntu_script; ubuntu_script=$(mktemp "$TMP_DIR/.sd_ubuntu_dl_XXXXXX.sh")
+    local _sd_chroot_fn='_chroot_bash() {
+    local r=$1; shift; local b=/bin/bash
+    [[ ! -e "$r/bin/bash" && -e "$r/usr/bin/bash" ]] && b=/usr/bin/bash
+    [[ ! -e "$r$b" ]] && b=/bin/sh
+    sudo -n chroot "$r" "$b" "$@"
+}'
+    cat > "$ubuntu_script" <<UBUNTUSCRIPT
+$_sd_chroot_fn
+trap '' INT
+printf '\033[1m── simpleDocker — Ubuntu base setup ──\033[0m\n\n'
+printf 'Downloading Ubuntu 24.04 LTS Noble base...\n'
+if curl -fsSL --progress-bar $(printf '%q' "$url") -o $(printf '%q' "$tmp"); then
+    printf 'Extracting...\n'
+    tar -xzf $(printf '%q' "$tmp") -C $(printf '%q' "$UBUNTU_DIR") 2>&1 || true
+    rm -f $(printf '%q' "$tmp")
+    if [[ ! -e $(printf '%q' "$UBUNTU_DIR/bin") ]]; then
+        ln -sf usr/bin $(printf '%q' "$UBUNTU_DIR/bin") 2>/dev/null || true
+    fi
+    if [[ ! -e $(printf '%q' "$UBUNTU_DIR/lib") ]]; then
+        ln -sf usr/lib $(printf '%q' "$UBUNTU_DIR/lib") 2>/dev/null || true
+    fi
+    if [[ ! -e $(printf '%q' "$UBUNTU_DIR/lib64") ]]; then
+        ln -sf usr/lib64 $(printf '%q' "$UBUNTU_DIR/lib64") 2>/dev/null || true
+    fi
+    printf 'nameserver 8.8.8.8\n' > $(printf '%q' "$UBUNTU_DIR/etc/resolv.conf") 2>/dev/null || true
+    printf 'APT::Sandbox::User "root";\n' > $(printf '%q' "$UBUNTU_DIR/etc/apt/apt.conf.d/99sandbox") 2>/dev/null || true
+        printf 'Pre-installing common packages...\n'
+    _chroot_bash "$UBUNTU_DIR" -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $DEFAULT_UBUNTU_PKGS 2>&1" || true
+    touch $(printf '%q' "$UBUNTU_DIR/.ubuntu_ready")
+    date '+%Y-%m-%d' > $(printf '%q' "$UBUNTU_DIR/.sd_ubuntu_stamp")
+    printf '%s\n' $DEFAULT_UBUNTU_PKGS > $(printf '%q' "$UBUNTU_DIR/.ubuntu_default_pkgs") 2>/dev/null || true
+    touch $(printf '%q' "$ok_flag")
+    printf '\n\033[0;32m✓ Ubuntu base ready.\033[0m\n'
+else
+    rm -f $(printf '%q' "$tmp")
+    touch $(printf '%q' "$fail_flag")
+    printf '\n\033[0;31m✗ Download failed.\033[0m\n'
+fi
+sleep 1
+tmux kill-session -t sdUbuntuSetup 2>/dev/null || true
+UBUNTUSCRIPT
+    chmod +x "$ubuntu_script"
+
+    local _tl_rc
+    _tmux_launch "sdUbuntuSetup" "Ubuntu base setup" "$ubuntu_script"
+    _tl_rc=$?
+    [[ $_tl_rc -eq 1 ]] && { rm -f "$ubuntu_script"; return 1; }
+}
+
+_chroot_mount()     { local d="$1"
+    sudo -n mount --bind /proc "$d/proc" 2>/dev/null || true
+---
+_tmux_launch() {
+    local _no_prompt=false _post_ok="" _post_fail=""
+    while [[ "${1:-}" == --* ]]; do
+        case "$1" in
+            --no-prompt)   _no_prompt=true; shift ;;
+            --post-launch) _post_ok="$2" _post_fail="$3"; shift 3 ;;
+            *) shift ;;
+        esac
+    done
+    local sess="$1" title="$2" script="$3"
+    local _logfile="" _logcmd=""
+    if [[ -n "$LOGS_DIR" ]]; then
+        _logfile="$LOGS_DIR/${sess}-$(date '+%Y%m%d_%H%M%S').log"
+        mkdir -p "$LOGS_DIR" 2>/dev/null || true
+        _logcmd=" 2>&1 | tee $(printf '%q' "$_logfile")"
+    fi
+
+    if [[ "$_no_prompt" == "true" ]]; then
+        tmux kill-session -t "$sess" 2>/dev/null || true
+        tmux new-session -d -s "$sess" "bash $(printf '%q' "$script")${_logcmd}; rm -f $(printf '%q' "$script")" 2>/dev/null
+        tmux switch-client -t "$sess" 2>/dev/null || true
+        sleep 0.1; stty sane 2>/dev/null
+        while IFS= read -r -t 0 -n 256 _ 2>/dev/null; do :; done
+        return 0
+    fi
+
+    local _fzf_out; _fzf_out=$(mktemp "$TMP_DIR/.sd_launch_fzf_XXXXXX")
+    printf '%s\n%s\n' \
+        "$(printf "${GRN}▶  Attach — follow live output${NC}")" \
+        "$(printf "${DIM}   Background — run silently${NC}")" \
+        | fzf "${FZF_BASE[@]}" \
+            --header="$(printf "${BLD}── %s ──${NC}\n${DIM}  Press %s to detach at any time without stopping.${NC}" \
+                "$title" "${KB[tmux_detach]}")" \
+            >"$_fzf_out" 2>/dev/null
+    local _rc=$?
+    local choice; choice=$(cat "$_fzf_out" 2>/dev/null | _trim_s)
+    rm -f "$_fzf_out"
+    [[ $_rc -ne 0 || -z "$choice" ]] && return 1
+
+    tmux kill-session -t "$sess" 2>/dev/null || true
+    tmux new-session -d -s "$sess" "bash $(printf '%q' "$script")${_logcmd}; rm -f $(printf '%q' "$script")" 2>/dev/null
+    tmux set-option -t "$sess" detach-on-destroy off 2>/dev/null || true
+
+    if printf '%s' "$choice" | grep -qi "attach"; then
+        tmux switch-client -t "$sess" 2>/dev/null || true
+        sleep 0.2; stty sane 2>/dev/null
+        while IFS= read -r -t 0.2 -n 256 _ 2>/dev/null; do :; done
+        tput reset 2>/dev/null || clear
+    else
+        sleep 0.1; stty sane 2>/dev/null
+        while IFS= read -r -t 0.15 -n 256 _ 2>/dev/null; do :; done
+        { while tmux_up "$sess" 2>/dev/null; do sleep 0.3; done
+          kill -USR1 "$SD_SHELL_PID" 2>/dev/null || true
+        } &
+        disown
+    fi
+    return 0
+}
+
