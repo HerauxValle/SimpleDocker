@@ -1,0 +1,53 @@
+{
+  "scopeName": "source.sdc",
+  "patterns": [
+    { "include": "#jobsection" },
+    { "include": "#section" },
+    { "include": "#assignment" },
+    { "include": "#valueLine" }
+  ],
+
+  "repository": {
+
+    "section": {
+      "patterns": [
+        {
+          "match": "^\\[[a-zA-Z0-9_]+\\]",
+          "name": "entity.name.section.sdc"
+        }
+      ]
+    },
+
+    "jobsection": {
+      "patterns": [
+        {
+          "match": "^\\[@[a-zA-Z0-9_]+\\]",
+          "name": "entity.name.section.job.sdc"
+        }
+      ]
+    },
+
+    "assignment": {
+      "patterns": [
+        {
+          "match": "^\\s*([A-Za-z0-9_]+)\\s*(=)\\s*(.*)$",
+          "captures": {
+            "1": { "name": "variable.key.sdc" },
+            "2": { "name": "keyword.operator.assignment.sdc" },
+            "3": { "name": "string.value.sdc" }
+          }
+        }
+      ]
+    },
+
+    "valueLine": {
+      "patterns": [
+        {
+          "match": "^\\s*[^\\[=].+$",
+          "name": "string.value.sdc"
+        }
+      ]
+    }
+
+  }
+}

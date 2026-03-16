@@ -1,0 +1,33 @@
+{
+  "name": "sdc-syntax",
+  "displayName": "SimpleDockerContainer Syntax",
+  "description": "Syntax highlighting for SimpleDockerContainer files",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.70.0"
+  },
+
+  "categories": [
+    "Programming Languages"
+  ],
+
+  "contributes": {
+
+    "languages": [
+      {
+        "id": "sdc",
+        "aliases": ["SDC"],
+        "extensions": [".sdc"]
+      }
+    ],
+
+    "grammars": [
+      {
+        "language": "sdc",
+        "scopeName": "source.sdc",
+        "path": "./syntaxes/sdc.tmLanguage.json"
+      }
+    ]
+
+  }
+}

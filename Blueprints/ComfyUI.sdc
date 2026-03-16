@@ -1,5 +1,3 @@
-# [ComfyUI]
-[container]
 [meta]
 name         = comfyui
 port         = 8188
@@ -33,4 +31,3 @@ ltdrdata/ComfyUI-Manager source → custom_nodes/ComfyUI-Manager
 venv/bin/pip install -r requirements.txt
 venv/bin/pip install -r custom_nodes/ComfyUI-Manager/requirements.txt
 
-[/container]

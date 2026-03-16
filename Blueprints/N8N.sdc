@@ -1,5 +1,3 @@
-# [N8N]
-[container]
 [meta]
 name        = n8n
 port        = 5678
@@ -31,4 +29,3 @@ data, logs
 [npm]
 n8n
 
-[/container]

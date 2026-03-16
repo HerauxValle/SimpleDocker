@@ -1,6 +1,3 @@
-# [Stash]
-[container]
-
 [meta]
 name         = stash
 version      = 0.29.0
@@ -50,4 +47,3 @@ exec bin/stash \
 Backup database now | cp config/stash-go.sqlite data/stash-backup-$(date +%F).sqlite && printf 'Backup done.\n'
 Clear cache         | rm -rf cache/* && printf 'Cache cleared.\n'
 
-[/container]

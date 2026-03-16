@@ -75,50 +75,7 @@ DEFAULT_IMG = ''
 DEFAULT_UBUNTU_PKGS = 'bash curl git wget ca-certificates zstd tar xz-utils python3 python3-venv python3-pip build-essential'
 SD_DEFAULT_KEYWORD  = '1991316125415311518'
 SD_LUKS_SLOT_MIN, SD_LUKS_SLOT_MAX = 7, 31
-_SD_PERSISTENT_BLUEPRINTS = """
-# Counter
-
-[container]
-
-[meta]
-name = counter-test
-version = 2.0.0
-port = 8833
-dialogue = Feature test
-storage_type = counter-test
-health = true
-log = logs/counter.log
-
-[dirs]
-logs
-
-[install]
-for i in $(seq 1 10); do
-  printf '%d\n' "$i"
-  sleep 0.2
-done
-printf 'Install done.\n'
-
-[start]
-mkdir -p logs
-n=0
-while true; do
-  n=$(( n + 1 ))
-  printf '[%s] tick %d\n' "$(date '+%H:%M:%S')" "$n" | tee -a logs/counter.log
-  sleep 1
-done
-
-[actions]
-Reset log | printf '' > logs/counter.log && printf 'Log cleared.\n'
-Show log tail | tail -20 logs/counter.log
-
-[cron]
-10s [ping] --autostart | printf "[cron] ping at %s\n" $(date +%H:%M:%S) >> logs/counter.log
-1m [minutely] | printf "[cron] 1min heartbeat\n" >> logs/counter.log
-
-[/container]
-"""
-
+SD_BP_EXT = '.sdc'  # blueprint file extension
 
 SD_AUTH_SLOT_A, SD_AUTH_SLOT_B = 2, 3   # auth key rotates between these; never touches passkey range
 SD_UNLOCK_ORDER = ['verified_system','default_keyword','prompt']
@@ -826,23 +783,9 @@ def set_img_dirs():
           str(G.groups_dir), str(G.logs_dir), capture=True)
     # Clear stale installed=true entries (§2.5)
     validate_containers()
-    # Seed persistent blueprints on first mount (§2.10)
-    _seed_persistent_blueprints()
     # TODO-009: background ubuntu cache check on every mount/remount (matches shell _set_img_dirs)
     pass  # ub_cache_check skipped (no background threads)
 
-def _seed_persistent_blueprints():
-    """Write built-in blueprints to .sd/persistent_blueprints/, always overwriting so
-    any update to _SD_PERSISTENT_BLUEPRINTS is immediately reflected on disk.
-    Matches shell behaviour: persistent BPs are embedded in the script and always
-    current — they never go stale."""
-    if not G.mnt_dir: return
-    pd = G.mnt_dir/'.sd/persistent_blueprints'
-    pd.mkdir(parents=True, exist_ok=True)
-    import re as _re
-    for m in _re.finditer(r'#\s*(\S+)\s*\n(.*?\[/container\])', _SD_PERSISTENT_BLUEPRINTS, _re.DOTALL):
-        name, content = m.group(1), m.group(2).strip()
-        (pd/f'{name}.container').write_text(f'# {name}\n\n{content}\n')
 
 def mount_img(img: Path) -> bool:
     mnt = G.sd_mnt_base/f'mnt_{img.stem}'
@@ -1303,15 +1246,33 @@ def bp_parse(text: str) -> dict:
     out: dict = {'meta':{},'environment':{},'storage':[],'deps':[],'dirs':[],'pip':[],'npm':[],
                  'git':[],'build':'','install':'','update':'','start':'','crons':[],'actions':[]}
     sec = None
+    _blk = {}        # current [@block] accumulator for cron/actions
+    _cmd_indent = '' # indent prefix when reading multiline cmd
+    _reading_cmd = False
     for line in text.splitlines():
-        stripped = line.rstrip()
+        raw = line.rstrip()
+        stripped = raw.strip()
         # section header
         m = re.match(r'^\[([a-zA-Z_/]+)\]$', stripped)
         if m:
+            # flush any open block
+            if _blk and sec == 'jobs':
+                _flush_block(out, _blk)
+                _blk = {}; _reading_cmd = False
             sec = m.group(1).lower()
+            if sec in ('container','/container'): sec = None
             continue
         if sec is None: continue
         if stripped.startswith('#') and sec not in _CODE_SECS: continue
+        # multiline cmd continuation
+        if _reading_cmd:
+            if raw.startswith(_cmd_indent) and raw.strip():
+                _blk['cmd'] = _blk.get('cmd','') + raw.strip() + '\n'
+                continue
+            else:
+                _blk['cmd'] = _blk.get('cmd','').rstrip('\n')
+                _reading_cmd = False
+                # fall through to process current line normally
         if sec in _CODE_SECS:
             out[sec] = out.get(sec,'') + line + '\n'
         elif sec in _LIST_SECS:
@@ -1325,7 +1286,6 @@ def bp_parse(text: str) -> dict:
             if '=' in stripped and not stripped.startswith('#'):
                 k,_,v = stripped.partition('=')
                 k=k.strip(); v=v.strip()
-                # type coerce
                 if v.lower()=='true': v=True
                 elif v.lower()=='false': v=False
                 elif v.isdigit(): v=int(v)
@@ -1333,12 +1293,28 @@ def bp_parse(text: str) -> dict:
         elif sec == 'git':
             if stripped and not stripped.startswith('#'):
                 out['git'].append(_parse_git_line(stripped))
-        elif sec == 'cron':
-            c = _parse_cron_line(stripped)
-            if c: out['crons'].append(c)
-        elif sec == 'actions':
-            a = _parse_action_line(stripped)
-            if a: out['actions'].append(a)
+        elif sec == 'jobs':
+            bm = re.match(r'^\[@([^\]]+)\]$', stripped)
+            if bm:
+                if _blk: _flush_block(out, _blk)
+                _blk = {'_type': bm.group(1).lower()}; _reading_cmd = False
+                continue
+            if not _blk: continue
+            if '=' in stripped and not stripped.startswith('#'):
+                k, _, v = stripped.partition('=')
+                k = k.strip(); v = v.strip()
+                if k == 'cmd':
+                    if v:
+                        _blk['cmd'] = v
+                    else:
+                        _cmd_indent = raw[:len(raw)-len(raw.lstrip())] + '  '
+                        _blk['cmd'] = ''
+                        _reading_cmd = True
+                else:
+                    _blk[k] = v
+    # flush last open block
+    if _blk and sec == 'jobs':
+        _flush_block(out, _blk)
     # strip trailing whitespace from code blocks
     for s in _CODE_SECS: out[s] = out.get(s,'').rstrip()
     return out
@@ -1358,18 +1334,26 @@ def _parse_git_line(line: str) -> dict:
     return {'repo':repo,'hint':hints[0] if hints else '','type':asset_type,
             'dest':dest,'source':source}
 
-def _parse_cron_line(line: str) -> Optional[dict]:
-    if not line or line.startswith('#'): return None
-    if '|' not in line: return None
-    head, _, cmd = line.partition('|')
-    head=head.strip(); cmd=cmd.strip().replace('\n',' ').replace('\r','')
-    cmd = re.sub(r'>>\s*([a-zA-Z_][^\s]*)', r'>> $CONTAINER_ROOT/\1', cmd)
-    m = re.match(r'^(\d+[smhdw]|mo)\s*(?:\[([^\]]+)\])?\s*(.*)',head)
-    if not m: return None
-    interval,name,flags = m.group(1),m.group(2) or '',m.group(3).strip()
-    return {'interval':interval,'name':name,'cmd':cmd,'flags':flags}
+def _flush_block(out: dict, blk: dict):
+    """Flush a completed [@type] block into out['crons'] or out['actions']."""
+    typ = blk.get('_type','')
+    name = blk.get('name','').strip('\"\' ')
+    cmd  = blk.get('cmd','').strip()
+    if typ == 'cron':
+        interval = blk.get('schedule','').strip('\"\' ')
+        if not interval or not name or not cmd: return
+        log  = blk.get('log','').strip('\"\' ')
+        flags_parts = []
+        if blk.get('autostart','').strip('\"\' ').lower() in ('true','1','yes'): flags_parts.append('--autostart')
+        if blk.get('unjailed','').strip('\"\' ').lower() in ('true','1','yes'): flags_parts.append('--unjailed')
+        if blk.get('sudo','').strip('\"\' ').lower() in ('true','1','yes'): flags_parts.append('--sudo')
+        out['crons'].append({'interval':interval,'name':name,'cmd':cmd,'flags':' '.join(flags_parts),'log':log})
+    elif typ == 'action':
+        if not name or not cmd: return
+        out['actions'].append({'label':name,'dsl':cmd})
 
 def _parse_action_line(line: str) -> Optional[dict]:
+    """Legacy single-line action: Label | cmd"""
     if not line or line.startswith('#'): return None
     if '|' not in line: return None
     label, _, dsl = line.partition('|')
@@ -1463,10 +1447,6 @@ def _ensure_src(cid: str):
 
 def bp_template() -> str:
     return '''
-# my-service
-
-[container]
-
 [meta]
 name = my-service
 version = 1.0.0
@@ -1530,19 +1510,12 @@ bin, data, logs
 # Script run to start the container (runs inside namespace+chroot)
 # $root = install path, $out/path = host path, $out~/path = host home path
 
-[cron]
-# interval [name] [--sudo] [--unjailed] | command
-# interval: [N][s|m|h] e.g. 30s, 5m, 1h
-# --unjailed: run on host instead of inside container
-# --sudo: wrap command with sudo
-# 5m [heartbeat] | printf '[cron] ping\n' >> logs/cron.log
-
-[actions]
-# One action per line: Label | [prompt: "text" |] [select: cmd [--skip-header] [--col N] |] cmd [{input}|{selection}]
-# ⊙ auto-prepended if label starts with a plain letter
-Show logs | tail -f logs/service.log
-
-[/container]
+[jobs]
+# [@cron]   schedule=5m  name=ping  log=logs/x.log  autostart=true
+#           cmd = printf "ping\n"
+#
+# [@action] name=Show logs
+#           cmd = tail -f logs/service.log
 '''
 
 def expand_dirs(dirs_list: list) -> List[str]:
@@ -1745,7 +1718,7 @@ def _cron_interval_secs(iv: str) -> int:
 def _cron_start_one(cid: str, idx: int, cr: dict):
     sname=cron_sess(cid,idx); ip=cpath(cid)
     secs=_cron_interval_secs(cr.get('interval','5m'))
-    cmd=cr.get('cmd','').replace('\\n', '\n'); name=cr.get('name',f'cron_{idx}')
+    cmd=cr.get('cmd',''); name=cr.get('name',f'cron_{idx}'); _log=cr.get('log','')
     _debug=('--debug' in sys.argv)
     _flags=cr.get('flags',''); unjailed='--unjailed' in _flags; use_sudo='--sudo' in _flags
     if use_sudo:
@@ -1760,6 +1733,9 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
         f.write('#!/usr/bin/env bash\n')
         f.write(f'_secs={secs}\n')
         f.write(f'_cron_next_file={next_file!r}\n')
+        if _log and ip:
+            _log_dir = str(os.path.dirname(os.path.join(str(ip), _log)))
+            f.write(f'mkdir -p {_log_dir!r}\n')
         if unjailed:
             f.write(f'export CONTAINER_ROOT={ip!r}\n')
             f.write('while true; do\n')
@@ -1800,14 +1776,17 @@ def _cron_start_one(cid: str, idx: int, cr: dict):
                 f.write(f'    printf "\\033[2m[debug] inner script:\\033[0m\\n"\n')
                 f.write(f'    cat {_inner_host!r}\n')
                 f.write(f'    printf "\\n"\n')
-            _ip_esc = str(ip).replace("'", "'\\''")
             _nsenter_cmd = ' && '.join([
-                f"mount -t proc proc '{_ip_esc}'/proc 2>/dev/null||true",
-                f"mount --bind /sys '{_ip_esc}'/sys 2>/dev/null||true",
-                f"mount --bind /dev '{_ip_esc}'/dev 2>/dev/null||true",
-                f"sudo -n chroot '{_ip_esc}' /bin/bash {_inner_chroot}",
+                f'mount -t proc proc {str(ip)}/proc 2>/dev/null||true',
+                f'mount --bind /sys {str(ip)}/sys 2>/dev/null||true',
+                f'mount --bind /dev {str(ip)}/dev 2>/dev/null||true',
+                f'sudo -n chroot {str(ip)} /bin/bash {_inner_chroot}',
             ])
-            f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__\n')
+            if _log and ip:
+                _log_host = str(ip)+'/'+_log
+                f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__ 2>&1 | tee -a {_log_host!r}\n')
+            else:
+                f.write(f'    sudo -n nsenter --net=/run/netns/{ns} -- unshare --mount --pid --uts --ipc --fork bash <<\'__SD_NS__\'\n{_nsenter_cmd}\n__SD_NS__\n')
             f.write(f'    _cron_next_ts=$(( $(date +%s) + _secs ))\n')
             f.write('    _cron_next_time=$(date -d "@$_cron_next_ts" +%H:%M:%S 2>/dev/null || date +%H:%M:%S)\n')
             f.write('    _cron_next_date=$(date -d "@$_cron_next_ts" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)\n')
@@ -3929,7 +3908,7 @@ def _build_update_items_for(cid: str, items: list, idx: list):
     # Blueprint updates: scan BLUEPRINTS_DIR for matching storage_type
     if G.blueprints_dir and G.blueprints_dir.is_dir():
         seen_stems = set()
-        for ext in ('*.container', '*.toml'):
+        for ext in ('*'+SD_BP_EXT,):
             for bf in G.blueprints_dir.glob(ext):
                 if bf.stem in seen_stems: continue
                 seen_stems.add(bf.stem)
@@ -3951,7 +3930,7 @@ def _build_update_items_for(cid: str, items: list, idx: list):
     presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
     if presets_dir and presets_dir.is_dir():
         seen_p = set()
-        for ext in ('*.container', '*.toml'):
+        for ext in ('*'+SD_BP_EXT,):
             for pf in presets_dir.glob(ext):
                 if pf.stem in seen_p: continue
                 seen_p.add(pf.stem)
@@ -4188,13 +4167,13 @@ def _do_blueprint_update(cid: str, idx: int):
     bps=[]; presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
     if G.blueprints_dir:
         seen=set()
-        for ext in ('*.container','*.toml'):
+        for ext in ('*'+SD_BP_EXT,):
             for f in G.blueprints_dir.glob(ext):
                 if f.stem not in seen: bps.append(f); seen.add(f.stem)
     # Also include persistent blueprints (DIV-055)
     if presets_dir and presets_dir.is_dir():
         seen_p=set(f.stem for f in bps)
-        for ext in ('*.container','*.toml'):
+        for ext in ('*'+SD_BP_EXT,):
             for pf in presets_dir.glob(ext):
                 if pf.stem not in seen_p: bps.append(pf); seen_p.add(pf.stem)
     try: bf=bps[int(idx)] if int(idx)<len(bps) else None
@@ -4393,14 +4372,12 @@ def containers_submenu():
 def install_method_menu():
     """New container — matches .sh _install_method_menu exactly."""
     bps  = _list_blueprint_names()
-    pbps = _list_persistent_names()
     ibps = _list_imported_names()
     load_containers()
 
     items = [f'{BLD}  ── Install from blueprint ───────────{NC}\t__sep__']
-    if bps or pbps or ibps:
+    if bps or ibps:
         for n in bps:  items.append(f'   {DIM}◈{NC}  {n}\tbp:{n}')
-        for n in pbps: items.append(f'   {BLU}◈{NC}  {n}  {DIM}[Persistent]{NC}\tpbp:{n}')
         for n in ibps: items.append(f'   {CYN}◈{NC}  {n}  {DIM}[Imported]{NC}\tibp:{n}')
     else:
         items.append(f'{DIM}  No blueprints found{NC}\t__sep__')
@@ -4423,57 +4400,42 @@ def install_method_menu():
     tag = sel.split('\t')[-1].strip() if '\t' in sel else ''
     if not tag or tag in ('__back__','__sep__'): return
 
-    cid = rand_id()
-    cdir = G.containers_dir/cid
-    cdir.mkdir(parents=True, exist_ok=True)
-
     if tag.startswith('bp:'):
         bname = tag[3:]
         bf = _bp_find_file(bname)
-        if not bf: pause(f"Blueprint '{bname}' not found."); shutil.rmtree(str(cdir),True); return
-        # suggest name from blueprint
+        if not bf: pause(f"Blueprint '{bname}' not found."); return
         try:
             sug = bp_parse(bf.read_text()).get('meta',{}).get('name','') or bname
         except: sug = bname
         v = finput(f'Container name (default: {sug}):')
-        if v is None: shutil.rmtree(str(cdir),True); return
+        if v is None: return
         ct_name = v.strip() or sug
+        cid = rand_id(); cdir = G.containers_dir/cid; cdir.mkdir(parents=True, exist_ok=True)
         shutil.copy(str(bf), str(cdir/'service.src'))
         bp_compile(cdir/'service.src', cid)
 
-    elif tag.startswith('pbp:'):
-        bname = tag[4:]
-        pd = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
-        bf = None
-        if pd:
-            for ext in ('.container','.toml'):
-                t = pd/f'{bname}{ext}'
-                if t.exists(): bf = t; break
-        if not bf: pause(f"Blueprint '{bname}' not found."); shutil.rmtree(str(cdir),True); return
-        v = finput(f'Container name (default: {bname}):')
-        if v is None: shutil.rmtree(str(cdir),True); return
-        ct_name = v.strip() or bname
-        shutil.copy(str(bf), str(cdir/'service.src'))
-        bp_compile(cdir/'service.src', cid)
 
     elif tag.startswith('ibp:'):
         bname = tag[4:]
         bf = _get_imported_bp_path(bname)
-        if not bf: pause(f"Could not locate imported blueprint '{bname}'."); shutil.rmtree(str(cdir),True); return
-        v = finput(f'Container name (default: {bname}):')
-        if v is None: shutil.rmtree(str(cdir),True); return
-        ct_name = v.strip() or bname
+        if not bf: pause(f"Could not locate imported blueprint '{bname}'."); return
+        try:
+            sug = bp_parse(bf.read_text()).get('meta',{}).get('name','') or bname
+        except: sug = bname
+        v = finput(f'Container name (default: {sug}):')
+        if v is None: return
+        ct_name = v.strip() or sug
+        cid = rand_id(); cdir = G.containers_dir/cid; cdir.mkdir(parents=True, exist_ok=True)
         shutil.copy(str(bf), str(cdir/'service.src'))
         bp_compile(cdir/'service.src', cid)
 
     elif tag.startswith('clone:'):
         src_cid = tag[6:]
-        shutil.rmtree(str(cdir), True)  # clone uses its own dir
         _clone_source_submenu(src_cid)
         return
 
     else:
-        shutil.rmtree(str(cdir), True); return
+        return
 
     ct_name = re.sub(r'[^a-zA-Z0-9_\-]','',ct_name) or cname(cid) or 'container'
     sf = cdir/'state.json'
@@ -4847,7 +4809,7 @@ def _list_blueprint_names() -> List[str]:
     if not G.blueprints_dir or not G.blueprints_dir.is_dir(): return []
     found = []
     seen = set()
-    for ext in ('*.container', '*.toml'):
+    for ext in ('*'+SD_BP_EXT,):
         for f in G.blueprints_dir.glob(ext):
             if f.stem not in seen:
                 found.append(f.stem); seen.add(f.stem)
@@ -4872,8 +4834,6 @@ def _bp_settings_set(key: str, val) -> None:
     data[key] = val
     f.write_text(json.dumps(data, indent=2))
 
-def _bp_persistent_enabled() -> bool:
-    return str(_bp_settings_get('persistent_blueprints','true')).lower() not in ('false','0')
 
 def _bp_autodetect_mode() -> str:
     return _bp_settings_get('autodetect_blueprints','Home')
@@ -4893,23 +4853,12 @@ def _bp_custom_paths_remove(p: str):
     cur = [x for x in _bp_custom_paths_get() if x != p]
     _bp_settings_set('custom_paths', json.dumps(cur))
 
-def _list_persistent_names() -> List[str]:
-    """Return built-in/persistent blueprint names when enabled."""
-    if not _bp_persistent_enabled(): return []
-    presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
-    if not presets_dir or not presets_dir.is_dir(): return []
-    found = []; seen = set()
-    for ext in ('*.container', '*.toml'):
-        for f in presets_dir.glob(ext):
-            if f.stem not in seen:
-                found.append(f.stem); seen.add(f.stem)
-    return found
 
 _imported_bp_cache: list = []
 _imported_bp_cache_ts: float = 0.0
 
 def _list_imported_names() -> List[str]:
-    """Autodetect .container files per autodetect mode. Prunes hidden dirs and vendor."""
+    """Autodetect blueprint files per autodetect mode. Prunes hidden dirs and vendor."""
     global _imported_bp_cache, _imported_bp_cache_ts
     if time.time() - _imported_bp_cache_ts < 5.0:
         return _imported_bp_cache
@@ -4934,7 +4883,7 @@ def _list_imported_names() -> List[str]:
             # prune hidden and vendor dirs in-place
             dirs[:] = [d for d in dirs if not d.startswith('.') and d not in _PRUNE]
             for fname in files:
-                if not fname.endswith('.container'): continue
+                if not fname.endswith(SD_BP_EXT): continue
                 p = Path(root)/fname
                 if G.blueprints_dir and p.parent == G.blueprints_dir: continue
                 found.append(p.stem)
@@ -4950,7 +4899,7 @@ def _get_imported_bp_path(name: str) -> Optional[Path]:
     elif mode == 'Custom': search_dirs = [Path(p) for p in _bp_custom_paths_get() if Path(p).is_dir()]
     _PRUNE = {'node_modules','__pycache__','.git','vendor'}
     for sd in search_dirs:
-        for p in sd.rglob('*.container'):
+        for p in sd.rglob('*'+SD_BP_EXT):
             parts = p.relative_to(sd).parts
             if any(part.startswith('.') for part in parts[:-1]): continue
             if any(part in _PRUNE for part in parts): continue
@@ -4958,20 +4907,11 @@ def _get_imported_bp_path(name: str) -> Optional[Path]:
                 return p
     return None
 
-def _view_persistent_bp(name: str):
-    presets_dir = G.mnt_dir/'.sd/persistent_blueprints' if G.mnt_dir else None
-    if not presets_dir: return
-    f = next((presets_dir/f'{name}{ext}' for ext in ('.container','.toml')
-               if (presets_dir/f'{name}{ext}').exists()), None)
-    if not f: pause(f"Persistent blueprint '{name}' not found."); return
-    fzf_run(f.read_text().splitlines(),
-            header=f'{BLD}── [Persistent] {name}  {DIM}(read only){NC} ──{NC}',
-            extra=['--no-multi','--disabled'])
 
 def _bp_find_file(name: str) -> Optional[Path]:
-    """Locate a blueprint file by stem, preferring .container over .toml."""
+    """Locate a blueprint file by stem."""
     if not G.blueprints_dir: return None
-    for ext in ('.container', '.toml'):
+    for ext in (SD_BP_EXT,):
         f = G.blueprints_dir/f'{name}{ext}'
         if f.exists(): return f
     return None
@@ -5012,18 +4952,16 @@ def blueprints_submenu():
     while True:
         os.system('clear')
         bps = _list_blueprint_names()
-        pbps = _list_persistent_names()
         ibps = _list_imported_names()
         items = [f'{BLD}  ── Blueprints ───────────────────────{NC}']
         for n in bps:  items.append(f' {DIM}◈{NC}  {n}')
-        for n in pbps: items.append(f' {BLU}◈{NC}  {n}  {DIM}[Persistent]{NC}')
         for n in ibps: items.append(f' {CYN}◈{NC}  {n}  {DIM}[Imported]{NC}')
-        if not bps and not pbps and not ibps:
+        if not bps and not ibps:
             items.append(f'{DIM}  (no blueprints yet){NC}')
         items += [f'{GRN} +  {L["bp_new"]}{NC}',
                   _nav_sep(), _back_item()]
         hdr = (f'{BLD}── Blueprints ──{NC}  '
-               f'{DIM}[{len(bps)} file · {len(pbps)} built-in · {len(ibps)} imported]{NC}')
+               f'{DIM}[{len(bps)} file · {len(ibps)} imported]{NC}')
         sel = fzf_run(items, header=hdr)
         if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
@@ -5036,14 +4974,11 @@ def blueprints_submenu():
             if v is None or not v.strip(): continue
             bname = re.sub(r'[^a-zA-Z0-9_\- ]','',v).strip()
             if not bname: continue
-            bfile = G.blueprints_dir/f'{bname}.toml'
+            bfile = G.blueprints_dir/f'{bname}{SD_BP_EXT}'
             if bfile.exists(): pause(f"Blueprint '{bname}' already exists."); continue
             bfile.write_text(bp_template())
             pause(f"Blueprint '{bname}' created. Select it to edit.")
             continue
-        elif '[Persistent]' in sc:
-            pname = re.sub(r'^\s*◈\s*','',strip_ansi(sc)).split('[Persistent]')[0].strip()
-            if pname: _view_persistent_bp(pname)
         elif '[Imported]' in sc:
             iname = re.sub(r'^\s*◈\s*','',strip_ansi(sc)).split('[Imported]')[0].strip()
             ipath = _get_imported_bp_path(iname)
@@ -5060,8 +4995,6 @@ def blueprints_submenu():
 def blueprints_settings_menu():
     """menus/blueprints.py"""
     while True:
-        pers = _bp_persistent_enabled()
-        pers_tog = f'{GRN}[Enabled]{NC}' if pers else f'{RED}[Disabled]{NC}'
         ad_mode = _bp_autodetect_mode()
         ad_lbl = {
             'Home':      f'{GRN}[Home]{NC}',
@@ -5072,28 +5005,24 @@ def blueprints_settings_menu():
         }.get(ad_mode, f'{DIM}[{ad_mode}]{NC}')
         items = [
             _sep('General'),
-            f' {DIM}◈{NC}  Persistent blueprints  {pers_tog}  {DIM}— toggle built-in visibility{NC}',
-            f' {DIM}◈{NC}  Autodetect blueprints  {ad_lbl}  {DIM}— scan for .container files{NC}',
+            f' {DIM}◈{NC}  Autodetect blueprints  {ad_lbl}  {DIM}— scan for {SD_BP_EXT} files{NC}',
         ]
-        if ad_mode == 'Custom':
-            items.append(_sep('Scanned paths'))
-            cpaths = _bp_custom_paths_get()
-            if not cpaths:
-                items.append(f'{DIM}  (no paths configured){NC}')
-            else:
-                for cp in cpaths:
-                    if Path(cp).is_dir(): items.append(f' {DIM}◈{NC}  {DIM}{cp}{NC}')
-                    else:                 items.append(f' {DIM}◈{NC}  {DIM}{cp}{NC}  {RED}[missing]{NC}')
-            items.append(f'{GRN} +  Add path{NC}')
+        items.append(_sep('Scanned paths'))
+        cpaths = _bp_custom_paths_get()
+        if not cpaths:
+            items.append(f'{DIM}  (no paths configured){NC}')
+        else:
+            for cp in cpaths:
+                if Path(cp).is_dir(): items.append(f' {DIM}◈{NC}  {DIM}{cp}{NC}')
+                else:                 items.append(f' {DIM}◈{NC}  {DIM}{cp}{NC}  {RED}[missing]{NC}')
+        items.append(f'{GRN} +  Add path{NC}')
         items += [_nav_sep(), _back_item()]
         sel = fzf_run(items, header=f'{BLD}── Blueprints — Settings ──{NC}')
         if not sel or clean(sel) == L['back']:
             if G.usr1_fired: G.usr1_fired = False; continue
             return
         sc = clean(sel)
-        if 'Persistent blueprints' in sc:
-            _bp_settings_set('persistent_blueprints', not pers)
-        elif 'Autodetect blueprints' in sc:
+        if 'Autodetect blueprints' in sc:
             cycle = ['Home','Root','Everywhere','Custom','Disabled']
             next_m = cycle[(cycle.index(ad_mode)+1) % len(cycle)] if ad_mode in cycle else 'Home'
             _bp_settings_set('autodetect_blueprints', next_m)
@@ -6517,7 +6446,7 @@ def main_menu():
                 for mn in _grp_containers(gid)
             )
         )
-        n_bp  = len(_list_blueprint_names()) + len(_list_persistent_names()) + len(_list_imported_names())
+        n_bp  = len(_list_blueprint_names()) + len(_list_imported_names())
         # Image label
         img_label = ''
         if G.img_path and G.mnt_dir:

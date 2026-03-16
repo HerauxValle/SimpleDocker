@@ -1,5 +1,3 @@
-# [OpenWebUI]
-[container]
 [meta]
 name         = open-webui
 version      = 0.6.5
@@ -29,4 +27,3 @@ data, logs
 [pip]
 open-webui
 
-[/container]

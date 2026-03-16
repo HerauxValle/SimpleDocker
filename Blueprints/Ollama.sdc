@@ -1,5 +1,3 @@
-# [Ollama]
-[container]
 [meta]
 name         = ollama
 version      = 0.9.0
@@ -33,4 +31,3 @@ Pull model   | prompt: "Model name (e.g. llama3.2, mistral):" | bin/ollama pull 
 List models  | bin/ollama list
 Remove model | select: bin/ollama list --skip-header --col 1 | bin/ollama rm {selection}
 
-[/container]
